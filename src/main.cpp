@@ -14,7 +14,7 @@
 #include <dwmapi.h>
 #include <magnification.h>
 #include <d3d11.h>
-#include <dxgi1_2.h>
+#include <dxgi1_3.h>
 #include <d3dcompiler.h>
 
 #include <winrt/base.h>
@@ -110,6 +110,7 @@ struct ScalingSession {
 
     com_ptr<IDXGISwapChain1> swapChain;
     com_ptr<ID3D11RenderTargetView> backBufferRtv;
+    HANDLE frameWaitable = nullptr;  // 화면에 표시될 준비가 되면 신호가 오는 핸들 (지연 감소용)
 
     // 잘라낸 원본 (클라이언트 영역)
     com_ptr<ID3D11Texture2D> srcTex;
@@ -456,6 +457,7 @@ static void StopScaling()
     if (g_scaling->framePool) g_scaling->framePool.Close();
     g_ctx->ClearState();
     g_ctx->Flush();
+    if (g_scaling->frameWaitable) CloseHandle(g_scaling->frameWaitable);
     if (g_scaling->overlay) DestroyWindow(g_scaling->overlay);
     delete g_scaling;
     g_scaling = nullptr;
@@ -512,8 +514,15 @@ static void StartScaling(HWND target)
     scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     scd.Scaling = DXGI_SCALING_STRETCH;
     scd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    scd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     check_hresult(factory->CreateSwapChainForHwnd(g_device.get(), s->overlay, &scd, nullptr, nullptr, s->swapChain.put()));
     factory->MakeWindowAssociation(s->overlay, DXGI_MWA_NO_ALT_ENTER);
+
+    // 기본값으로는 GPU에 최대 3프레임이 대기열로 쌓여 커서와 화면이 늦게 보인다.
+    // 대기열을 1프레임으로 줄이고, 표시 직전에 렌더링을 시작하도록 대기 핸들을 쓴다.
+    auto swapChain2 = s->swapChain.as<IDXGISwapChain2>();
+    check_hresult(swapChain2->SetMaximumFrameLatency(1));
+    s->frameWaitable = swapChain2->GetFrameLatencyWaitableObject();
 
     com_ptr<ID3D11Texture2D> backBuffer;
     check_hresult(s->swapChain->GetBuffer(0, IID_PPV_ARGS(backBuffer.put())));
@@ -532,34 +541,34 @@ static void StartScaling(HWND target)
 // 렌더링
 // ---------------------------------------------------------------------------
 
-// 캡처 텍스처 안에서 대상 창의 클라이언트 영역(제목 표시줄/테두리 제외) 위치를 구한다.
-static bool GetClientCrop(HWND hwnd, UINT texW, UINT texH, D3D11_BOX& box)
+// 대상 창의 클라이언트 영역(제목 표시줄/테두리 제외) 중 모니터에 실제로 보이는 부분을 구한다.
+// 창이 화면보다 커서 밖으로 나간 부분은 DWM이 그리지 않아 흰색으로 캡처되므로 잘라낸다.
+// box: 캡처 텍스처 안의 위치, screenRect: 화면 좌표
+static bool GetVisibleClient(const ScalingSession* s, UINT texW, UINT texH, D3D11_BOX& box, RECT& screenRect)
 {
     RECT frame;
-    if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))) return false;
+    if (FAILED(DwmGetWindowAttribute(s->target, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))) return false;
     RECT client;
-    GetClientRect(hwnd, &client);
+    GetClientRect(s->target, &client);
     POINT tl = { 0, 0 };
-    ClientToScreen(hwnd, &tl);
+    ClientToScreen(s->target, &tl);
 
-    LONG left = std::clamp<LONG>(tl.x - frame.left, 0, texW);
-    LONG top = std::clamp<LONG>(tl.y - frame.top, 0, texH);
-    LONG right = std::clamp<LONG>(left + client.right, 0, texW);
-    LONG bottom = std::clamp<LONG>(top + client.bottom, 0, texH);
-    if (right <= left || bottom <= top) return false;
+    RECT clientScreen = { tl.x, tl.y, tl.x + client.right, tl.y + client.bottom };
+    RECT texScreen = { frame.left, frame.top, frame.left + (LONG)texW, frame.top + (LONG)texH };
+    RECT visible;
+    if (!IntersectRect(&visible, &clientScreen, &s->monitor)) return false;
+    if (!IntersectRect(&visible, &visible, &texScreen)) return false;
 
-    box = { (UINT)left, (UINT)top, 0, (UINT)right, (UINT)bottom, 1 };
+    box = { (UINT)(visible.left - frame.left), (UINT)(visible.top - frame.top), 0,
+            (UINT)(visible.right - frame.left), (UINT)(visible.bottom - frame.top), 1 };
+    screenRect = visible;
     return true;
 }
 
-// 원본 창 영역과 화면 비율을 유지한 확대 출력 영역을 화면 좌표로 계산한다.
+// 화면 비율을 유지한 확대 출력 영역을 화면 좌표로 계산한다.
 static void UpdateLayout(ScalingSession* s)
 {
     if (!s->srcTex) return;
-
-    POINT tl = { 0, 0 };
-    ClientToScreen(s->target, &tl);
-    s->srcScreen = { tl.x, tl.y, tl.x + (LONG)s->srcW, tl.y + (LONG)s->srcH };
 
     float scale = std::min((float)s->outW / s->srcW, (float)s->outH / s->srcH);
     if (g_settings.integerScale) scale = std::max(1.0f, std::floor(scale));
@@ -675,13 +684,18 @@ static void RenderFrame()
         check_hresult(access->GetInterface(IID_PPV_ARGS(frameTex.put())));
 
         D3D11_BOX box;
-        if (GetClientCrop(s->target, contentSize.Width, contentSize.Height, box)) {
+        RECT visible;
+        if (GetVisibleClient(s, contentSize.Width, contentSize.Height, box, visible)) {
             EnsureTexture(s->srcTex, s->srcSrv, nullptr, s->srcW, s->srcH, box.right - box.left, box.bottom - box.top);
             g_ctx->CopySubresourceRegion(s->srcTex.get(), 0, 0, 0, 0, frameTex.get(), 0, &box);
         }
     }
 
-    // 2. 출력 영역 계산과 커서 위치 처리
+    // 2. 원본 영역(창이 움직였을 수 있으므로 매 프레임), 출력 영역, 커서 위치 처리
+    D3D11_BOX box;
+    RECT visible;
+    if (s->srcTex && GetVisibleClient(s, s->poolSize.Width, s->poolSize.Height, box, visible))
+        s->srcScreen = { visible.left, visible.top, visible.left + (LONG)s->srcW, visible.top + (LONG)s->srcH };
     UpdateLayout(s);
     UpdateCursor(s);
 
@@ -883,7 +897,9 @@ int wmain(int argc, wchar_t** argv)
                     StopScaling();
                     continue;
                 }
-                RenderFrame();  // Present(1, 0)이 수직동기까지 대기하므로 바쁜 루프가 되지 않는다.
+                // 이전 프레임이 화면에 표시될 때까지 기다린 뒤, 가장 최신 캡처와 커서 위치로 그린다.
+                WaitForSingleObjectEx(g_scaling->frameWaitable, 100, TRUE);
+                RenderFrame();
                 PrintStatus();
             } else {
                 // 스케일링 중이 아니면 메시지가 올 때까지 대기
