@@ -143,7 +143,7 @@ OpenScaler.exe --target "창 제목 일부" --mode 3 --sharp 0.5 --integer --dur
 `x64 Native Tools Command Prompt for VS`를 열고:
 
 ```
-git clone https://github.com/<계정>/OpenScaler.git
+git clone https://github.com/kojunpyo/OpenScaler.git
 cd OpenScaler
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
