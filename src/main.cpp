@@ -17,6 +17,8 @@
 #include <d3d11.h>
 #include <dxgi1_3.h>
 #include <d3dcompiler.h>
+#include <d2d1_1.h>
+#include <dwrite.h>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -55,13 +57,14 @@ using Clock = std::chrono::steady_clock;
 enum Mode { MODE_NEAREST, MODE_BILINEAR, MODE_BICUBIC, MODE_LANCZOS, MODE_FSR, MODE_COUNT };
 static const char* kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2", "FSR 1.0" };
 
-enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_QUIT };
+enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_QUIT };
 
 struct Settings {
     int mode = MODE_FSR;
     float sharpness = 0.5f;
     bool integerScale = false;
     bool compare = false;  // 화면 분할 비교: 왼쪽은 Bilinear(일반 확대), 오른쪽은 현재 모드
+    bool osdAlways = false; // 화면 위 상태 표시를 항상 켜 둔다 (끄면 설정을 바꿀 때만 잠깐 표시)
 };
 
 // HLSL cbuffer Params와 같은 레이아웃 (16바이트 정렬)
@@ -96,6 +99,12 @@ static com_ptr<ID3D11BlendState> g_blendAlpha;   // 일반 커서 픽셀: 알파
 static com_ptr<ID3D11BlendState> g_blendInvert;  // 흑백 커서의 반전 픽셀: 1 - 배경색
 static com_ptr<ID3D11RasterizerState> g_rsScissor;  // 비교 모드에서 화면 절반만 그릴 때 사용
 static com_ptr<ID3D11ShaderResourceView> g_whiteSrv; // 1x1 흰색 텍스처 (비교 모드 구분선)
+
+// 화면 위 상태 표시(OSD)용 Direct2D / DirectWrite
+static com_ptr<ID2D1Factory1> g_d2dFactory;
+static com_ptr<ID2D1DeviceContext> g_d2dCtx;
+static com_ptr<IDWriteFactory> g_dwFactory;
+static Clock::time_point g_osdUntil;  // 이 시각까지 상태를 표시한다
 
 static bool g_systemCursorHidden = false;
 
@@ -142,9 +151,17 @@ struct ScalingSession {
     bool cursorMapped = false;  // true: 실제 커서가 원본 창 안에 있고 확대 위치에 직접 그리는 중
     std::unordered_map<HCURSOR, CursorImage> cursors;
 
+    // 화면 위 상태 표시
+    com_ptr<ID2D1Bitmap1> d2dTarget;  // 백버퍼를 Direct2D에서 그릴 수 있게 감싼 것
+    com_ptr<IDWriteTextFormat> textFormat;
+    com_ptr<ID2D1SolidColorBrush> textBrush;
+    com_ptr<ID2D1SolidColorBrush> bgBrush;
+
     // 통계
     int capturedFrames = 0;
     int presentedFrames = 0;
+    double captureFps = 0;
+    double outputFps = 0;
     Clock::time_point statTime;
 };
 static ScalingSession* g_scaling = nullptr;
@@ -238,6 +255,15 @@ static void InitD3D()
     rd.ScissorEnable = TRUE;
     check_hresult(g_device->CreateRasterizerState(&rd, g_rsScissor.put()));
     g_whiteSrv = CreatePixelSrv({ 0xFFFFFFFF }, 1, 1);
+
+    // Direct2D를 같은 D3D 디바이스 위에 만들어 백버퍼에 글자를 그린다.
+    check_hresult(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1), nullptr,
+                                    g_d2dFactory.put_void()));
+    com_ptr<ID2D1Device> d2dDevice;
+    check_hresult(g_d2dFactory->CreateDevice(dxgiDevice.get(), d2dDevice.put()));
+    check_hresult(d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, g_d2dCtx.put()));
+    check_hresult(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                      reinterpret_cast<IUnknown**>(g_dwFactory.put())));
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +505,7 @@ static void StopScaling()
     ShowSystemCursor(true);
     if (g_scaling->session) g_scaling->session.Close();
     if (g_scaling->framePool) g_scaling->framePool.Close();
+    g_d2dCtx->SetTarget(nullptr);
     g_ctx->ClearState();
     g_ctx->Flush();
     if (g_scaling->frameWaitable) CloseHandle(g_scaling->frameWaitable);
@@ -551,6 +578,17 @@ static void StartScaling(HWND target)
     com_ptr<ID3D11Texture2D> backBuffer;
     check_hresult(s->swapChain->GetBuffer(0, IID_PPV_ARGS(backBuffer.put())));
     check_hresult(g_device->CreateRenderTargetView(backBuffer.get(), nullptr, s->backBufferRtv.put()));
+
+    // 상태 표시: 글자 크기는 출력 높이에 비례 (1080p에서 24px)
+    D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+    check_hresult(g_d2dCtx->CreateBitmapFromDxgiSurface(backBuffer.as<IDXGISurface>().get(), &bp, s->d2dTarget.put()));
+    check_hresult(g_dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+                                                DWRITE_FONT_STRETCH_NORMAL, s->outH / 45.0f, L"ko-kr", s->textFormat.put()));
+    check_hresult(g_d2dCtx->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), s->textBrush.put()));
+    check_hresult(g_d2dCtx->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.6f), s->bgBrush.put()));
+    g_osdUntil = Clock::now() + std::chrono::milliseconds(3000);
 
     s->session.StartCapture();
     s->statTime = Clock::now();
@@ -684,6 +722,56 @@ static void DrawCursor(ScalingSession* s)
     g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
 }
 
+// 반투명 검은 상자 위에 글자를 그린다. alignBottom이면 y는 상자의 아래쪽 끝이다.
+static void DrawLabel(ScalingSession* s, const wchar_t* text, float x, float y, bool alignBottom)
+{
+    com_ptr<IDWriteTextLayout> layout;
+    check_hresult(g_dwFactory->CreateTextLayout(text, (UINT32)wcslen(text), s->textFormat.get(), 4000.0f, 4000.0f,
+                                                layout.put()));
+    DWRITE_TEXT_METRICS m;
+    check_hresult(layout->GetMetrics(&m));
+    float pad = s->textFormat->GetFontSize() * 0.5f;
+    float h = m.height + pad * 2;
+    if (alignBottom) y -= h;
+    D2D1_ROUNDED_RECT bg = { { x, y, x + m.width + pad * 2, y + h }, pad * 0.6f, pad * 0.6f };
+    g_d2dCtx->FillRoundedRectangle(bg, s->bgBrush.get());
+    g_d2dCtx->DrawTextLayout({ x + pad, y + pad }, layout.get(), s->textBrush.get());
+}
+
+// 설정을 바꾸면 잠깐(또는 항상) 현재 상태를 보여 주고, 비교 모드에서는 양쪽에 이름표를 붙인다.
+static void DrawOsd(ScalingSession* s)
+{
+    bool showStatus = g_settings.osdAlways || Clock::now() < g_osdUntil;
+    if (!showStatus && !g_settings.compare) return;
+
+    float left = (float)(s->dstScreen.left - s->monitor.left);
+    float top = (float)(s->dstScreen.top - s->monitor.top);
+    float right = (float)(s->dstScreen.right - s->monitor.left);
+    float bottom = (float)(s->dstScreen.bottom - s->monitor.top);
+    float margin = s->textFormat->GetFontSize() * 0.75f;
+
+    g_d2dCtx->SetTarget(s->d2dTarget.get());
+    g_d2dCtx->BeginDraw();
+
+    if (showStatus) {
+        wchar_t text[256];
+        swprintf_s(text, L"%hs  ·  샤픈 %.1f  ·  정수배 %ls\n%u×%u → %u×%u  ·  출력 %.0f fps  ·  캡처 %.0f fps",
+                   kModeNames[g_settings.mode], g_settings.sharpness, g_settings.integerScale ? L"ON" : L"OFF",
+                   s->srcW, s->srcH, s->midW, s->midH, s->outputFps, s->captureFps);
+        DrawLabel(s, text, left + margin, top + margin, false);
+    }
+
+    if (g_settings.compare) {
+        wchar_t text[64];
+        swprintf_s(text, L"OpenScaler: %hs", kModeNames[g_settings.mode]);
+        DrawLabel(s, L"일반 확대 (Bilinear)", left + margin, bottom - margin, true);
+        DrawLabel(s, text, (left + right) / 2 + margin, bottom - margin, true);
+    }
+
+    g_d2dCtx->EndDraw();
+    g_d2dCtx->SetTarget(nullptr);
+}
+
 static void RenderFrame()
 {
     auto s = g_scaling;
@@ -723,6 +811,8 @@ static void RenderFrame()
     UpdateLayout(s);
     UpdateCursor(s);
 
+    // 지난 프레임의 Direct2D 그리기가 남긴 파이프라인 상태를 지우고 시작한다.
+    g_ctx->ClearState();
     float clear[4] = { 0, 0, 0, 1 };
     g_ctx->ClearRenderTargetView(s->backBufferRtv.get(), clear);
 
@@ -782,6 +872,9 @@ static void RenderFrame()
 
         // Pass 3: 커서
         DrawCursor(s);
+
+        // Pass 4: 화면 위 상태 표시
+        DrawOsd(s);
     }
 
     // 3. 수직동기에 맞춰 출력
@@ -807,6 +900,8 @@ static void PrintStatus()
            g_scaling->cursorMapped ? "변환" : "일반",
            g_scaling->capturedFrames / sec, g_scaling->presentedFrames / sec);
     fflush(stdout);
+    g_scaling->captureFps = g_scaling->capturedFrames / sec;
+    g_scaling->outputFps = g_scaling->presentedFrames / sec;
     g_scaling->capturedFrames = 0;
     g_scaling->presentedFrames = 0;
     g_scaling->statTime = now;
@@ -828,6 +923,9 @@ static bool HandleHotkey(int id)
     case HK_COMPARE:
         g_settings.compare = !g_settings.compare;
         break;
+    case HK_OSD:
+        g_settings.osdAlways = !g_settings.osdAlways;
+        break;
     case HK_SHARP_UP:
         g_settings.sharpness = std::min(1.0f, g_settings.sharpness + 0.1f);
         break;
@@ -837,6 +935,7 @@ static bool HandleHotkey(int id)
     case HK_QUIT:
         return false;
     }
+    g_osdUntil = Clock::now() + std::chrono::milliseconds(2500);  // 바뀐 설정을 화면에 잠깐 보여 준다
     return true;
 }
 
@@ -847,7 +946,7 @@ static void RegisterHotkeys()
         { HK_TOGGLE, 'S', "Alt+Shift+S" },        { HK_MODE, 'M', "Alt+Shift+M" },
         { HK_INTEGER, 'I', "Alt+Shift+I" },       { HK_SHARP_UP, VK_UP, "Alt+Shift+Up" },
         { HK_SHARP_DOWN, VK_DOWN, "Alt+Shift+Down" }, { HK_COMPARE, 'C', "Alt+Shift+C" },
-        { HK_QUIT, 'Q', "Alt+Shift+Q" },
+        { HK_OSD, 'O', "Alt+Shift+O" },           { HK_QUIT, 'Q', "Alt+Shift+Q" },
     };
     for (auto& k : keys) {
         if (!RegisterHotKey(nullptr, k.id, mods, k.vk))
@@ -885,6 +984,7 @@ static void PrintHelp()
            "  Alt+Shift+M     업스케일 모드 변경 (Nearest/Bilinear/Bicubic/Lanczos2/FSR 1.0)\n"
            "  Alt+Shift+I     정수배 스케일링 켜기/끄기\n"
            "  Alt+Shift+C     비교 모드 (왼쪽: 일반 확대, 오른쪽: 현재 모드)\n"
+           "  Alt+Shift+O     화면 위 상태 표시 항상 켜기/끄기\n"
            "  Alt+Shift+Up    샤프닝 강하게\n"
            "  Alt+Shift+Down  샤프닝 약하게\n"
            "  Alt+Shift+Q     프로그램 종료\n"

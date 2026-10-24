@@ -36,4 +36,4 @@ add_executable(OpenScaler
 target_include_directories(OpenScaler PRIVATE ${SHADER_OUT} third_party/fsr)
 target_compile_definitions(OpenScaler PRIVATE UNICODE _UNICODE NOMINMAX)
 target_compile_options(OpenScaler PRIVATE /utf-8 /W3 /EHsc /permissive-)
-target_link_libraries(OpenScaler PRIVATE d3d11 dxgi d3dcompiler dwmapi magnification windowsapp)
+target_link_libraries(OpenScaler PRIVATE d3d11 dxgi d3dcompiler d2d1 dwrite dwmapi magnification windowsapp)
