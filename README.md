@@ -45,6 +45,7 @@ OpenScaler는 같은 원리를 오픈소스로 구현하고, 각 단계(화면 �
 | 업스케일 알고리즘 | Nearest / Bilinear / Bicubic(Catmull-Rom) / Lanczos2 / FSR 1.0 | ✅ 완료 |
 | 샤프닝 | 대비 적응형 샤프닝 (AMD CAS의 아이디어를 바탕으로 구현) | ✅ 완료 |
 | 정수배 스케일링 | 픽셀 아트 게임을 위한 정수배 확대 | ✅ 완료 |
+| 비교 모드 | 화면을 반으로 나눠 왼쪽은 일반 확대(Bilinear), 오른쪽은 현재 모드로 표시 | ✅ 완료 |
 | 마우스 좌표 변환 | 확대된 화면에서 클릭한 위치를 원본 창 좌표로 변환 | ✅ 완료 |
 | 단축키 | 시작/중지, 모드 변경, 샤프닝 조절 | ✅ 완료 |
 | FSR 1.0 (EASU + RCAS) | AMD FidelityFX Super Resolution 1.0 이식 | ✅ 완료 |
@@ -96,6 +97,11 @@ OpenScaler는 같은 원리를 오픈소스로 구현하고, 각 단계(화면 �
 
 ![업스케일 알고리즘 비교: Nearest, Lanczos2, FSR 1.0](docs/compare_modes.png)
 
+**비교 모드**(Alt+Shift+C)를 켜면 한 화면에서 차이를 바로 볼 수 있습니다.
+왼쪽은 OpenScaler 없이 화면을 늘렸을 때와 같은 일반 확대(Bilinear), 오른쪽은 현재 선택한 모드입니다.
+
+![비교 모드: 왼쪽 Bilinear, 오른쪽 FSR 1.0](docs/compare_split.png)
+
 ### FSR 1.0 구현
 
 - 알고리즘 본체는 AMD 공식 헤더(`third_party/fsr`, MIT 라이선스)를 수정 없이 사용합니다.
@@ -130,6 +136,7 @@ OpenScaler는 같은 원리를 오픈소스로 구현하고, 각 단계(화면 �
 | Alt+Shift+S | 현재 활성 창 스케일링 시작/중지 |
 | Alt+Shift+M | 업스케일 모드 변경 |
 | Alt+Shift+I | 정수배 스케일링 켜기/끄기 |
+| Alt+Shift+C | 비교 모드 켜기/끄기 |
 | Alt+Shift+↑ / ↓ | 샤프닝 강도 조절 (0.0 ~ 1.0) |
 | Alt+Shift+Q | 종료 |
 
@@ -145,6 +152,7 @@ OpenScaler.exe --target "창 제목 일부" --mode 3 --sharp 0.5 --integer --dur
 | `--mode` | 0: Nearest, 1: Bilinear, 2: Bicubic, 3: Lanczos2, 4: FSR 1.0 |
 | `--sharp` | 샤프닝 강도 (0 ~ 1) |
 | `--integer` | 정수배 스케일링 사용 |
+| `--compare` | 비교 모드로 시작 |
 | `--duration` | 지정한 초가 지나면 자동 종료 |
 
 ### 빌드 방법

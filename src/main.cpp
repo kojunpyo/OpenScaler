@@ -55,12 +55,13 @@ using Clock = std::chrono::steady_clock;
 enum Mode { MODE_NEAREST, MODE_BILINEAR, MODE_BICUBIC, MODE_LANCZOS, MODE_FSR, MODE_COUNT };
 static const char* kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2", "FSR 1.0" };
 
-enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_QUIT };
+enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_QUIT };
 
 struct Settings {
     int mode = MODE_FSR;
     float sharpness = 0.5f;
     bool integerScale = false;
+    bool compare = false;  // 화면 분할 비교: 왼쪽은 Bilinear(일반 확대), 오른쪽은 현재 모드
 };
 
 // HLSL cbuffer Params와 같은 레이아웃 (16바이트 정렬)
@@ -93,6 +94,8 @@ static com_ptr<ID3D11Buffer> g_cbuffer;
 static com_ptr<ID3D11Buffer> g_fsrCbuffer;
 static com_ptr<ID3D11BlendState> g_blendAlpha;   // 일반 커서 픽셀: 알파 블렌딩
 static com_ptr<ID3D11BlendState> g_blendInvert;  // 흑백 커서의 반전 픽셀: 1 - 배경색
+static com_ptr<ID3D11RasterizerState> g_rsScissor;  // 비교 모드에서 화면 절반만 그릴 때 사용
+static com_ptr<ID3D11ShaderResourceView> g_whiteSrv; // 1x1 흰색 텍스처 (비교 모드 구분선)
 
 static bool g_systemCursorHidden = false;
 
@@ -187,6 +190,8 @@ static com_ptr<ID3D11BlendState> CreateBlend(D3D11_BLEND src, D3D11_BLEND dst)
     return state;
 }
 
+static com_ptr<ID3D11ShaderResourceView> CreatePixelSrv(const std::vector<uint32_t>& px, UINT w, UINT h);
+
 static void InitD3D()
 {
     D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
@@ -225,6 +230,14 @@ static void InitD3D()
     g_blendAlpha = CreateBlend(D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA);
     // 셰이더 출력이 흰색(1)이면 1 - 배경, 검은색(0)이면 배경 그대로
     g_blendInvert = CreateBlend(D3D11_BLEND_INV_DEST_COLOR, D3D11_BLEND_INV_SRC_COLOR);
+
+    D3D11_RASTERIZER_DESC rd = {};
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    rd.ScissorEnable = TRUE;
+    check_hresult(g_device->CreateRasterizerState(&rd, g_rsScissor.put()));
+    g_whiteSrv = CreatePixelSrv({ 0xFFFFFFFF }, 1, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -615,7 +628,7 @@ static void EnsureTexture(com_ptr<ID3D11Texture2D>& tex, com_ptr<ID3D11ShaderRes
     curH = h;
 }
 
-static void SetParams(UINT w, UINT h, float sharpness)
+static void SetParams(UINT w, UINT h, int mode, float sharpness)
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
     check_hresult(g_ctx->Map(g_cbuffer.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
@@ -624,15 +637,15 @@ static void SetParams(UINT w, UINT h, float sharpness)
     p->srcSize[1] = (float)h;
     p->invSrcSize[0] = 1.0f / w;
     p->invSrcSize[1] = 1.0f / h;
-    p->mode = g_settings.mode;
+    p->mode = mode;
     p->sharpness = sharpness;
     g_ctx->Unmap(g_cbuffer.get(), 0);
 }
 
 static void DrawPass(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, ID3D11PixelShader* ps,
-                     ID3D11ShaderResourceView* srv, UINT srcW, UINT srcH, float sharpness = -1)
+                     ID3D11ShaderResourceView* srv, UINT srcW, UINT srcH, float sharpness = -1, int mode = -1)
 {
-    SetParams(srcW, srcH, sharpness < 0 ? g_settings.sharpness : sharpness);
+    SetParams(srcW, srcH, mode < 0 ? g_settings.mode : mode, sharpness < 0 ? g_settings.sharpness : sharpness);
     g_ctx->OMSetRenderTargets(1, &rtv, nullptr);
     g_ctx->RSSetViewports(1, &vp);
     g_ctx->PSSetShader(ps, nullptr, 0);
@@ -754,6 +767,19 @@ static void RenderFrame()
         else
             DrawPass(s->backBufferRtv.get(), vp2, g_psSharpen.get(), s->midSrv.get(), dstW, dstH, fsr ? 0.0f : -1.0f);
 
+        // 비교 모드: 왼쪽 절반을 Bilinear(샤프닝 없음)로 덮어 그리고 가운데에 구분선을 긋는다.
+        if (g_settings.compare) {
+            LONG half = (LONG)offX + (LONG)dstW / 2;
+            D3D11_RECT left = { (LONG)offX, (LONG)offY, half, (LONG)offY + (LONG)dstH };
+            g_ctx->RSSetState(g_rsScissor.get());
+            g_ctx->RSSetScissorRects(1, &left);
+            DrawPass(s->backBufferRtv.get(), vp2, g_psScale.get(), s->srcSrv.get(), s->srcW, s->srcH, 0.0f, MODE_BILINEAR);
+            g_ctx->RSSetState(nullptr);
+
+            D3D11_VIEWPORT line = { (float)(half - 1), offY, 2, (float)dstH, 0, 1 };
+            DrawPass(s->backBufferRtv.get(), line, g_psCursor.get(), g_whiteSrv.get(), 1, 1);
+        }
+
         // Pass 3: 커서
         DrawCursor(s);
     }
@@ -774,9 +800,10 @@ static void PrintStatus()
     double sec = std::chrono::duration<double>(now - g_scaling->statTime).count();
     if (sec < 1.0) return;
 
-    printf("\r  %ux%u -> %ux%u | 모드: %-8s | 샤픈: %.1f | 정수배: %-3s | 커서: %-4s | 캡처 %3.0f fps | 출력 %3.0f fps   ",
+    printf("\r  %ux%u -> %ux%u | 모드: %-8s | 샤픈: %.1f | 정수배: %-3s | 비교: %-3s | 커서: %-4s | 캡처 %3.0f fps | 출력 %3.0f fps   ",
            g_scaling->srcW, g_scaling->srcH, g_scaling->midW, g_scaling->midH,
            kModeNames[g_settings.mode], g_settings.sharpness, g_settings.integerScale ? "ON" : "OFF",
+           g_settings.compare ? "ON" : "OFF",
            g_scaling->cursorMapped ? "변환" : "일반",
            g_scaling->capturedFrames / sec, g_scaling->presentedFrames / sec);
     fflush(stdout);
@@ -798,6 +825,9 @@ static bool HandleHotkey(int id)
     case HK_INTEGER:
         g_settings.integerScale = !g_settings.integerScale;
         break;
+    case HK_COMPARE:
+        g_settings.compare = !g_settings.compare;
+        break;
     case HK_SHARP_UP:
         g_settings.sharpness = std::min(1.0f, g_settings.sharpness + 0.1f);
         break;
@@ -816,7 +846,8 @@ static void RegisterHotkeys()
     struct { int id; UINT vk; const char* name; } keys[] = {
         { HK_TOGGLE, 'S', "Alt+Shift+S" },        { HK_MODE, 'M', "Alt+Shift+M" },
         { HK_INTEGER, 'I', "Alt+Shift+I" },       { HK_SHARP_UP, VK_UP, "Alt+Shift+Up" },
-        { HK_SHARP_DOWN, VK_DOWN, "Alt+Shift+Down" }, { HK_QUIT, 'Q', "Alt+Shift+Q" },
+        { HK_SHARP_DOWN, VK_DOWN, "Alt+Shift+Down" }, { HK_COMPARE, 'C', "Alt+Shift+C" },
+        { HK_QUIT, 'Q', "Alt+Shift+Q" },
     };
     for (auto& k : keys) {
         if (!RegisterHotKey(nullptr, k.id, mods, k.vk))
@@ -853,6 +884,7 @@ static void PrintHelp()
            "  Alt+Shift+S     현재 활성 창 스케일링 시작/중지\n"
            "  Alt+Shift+M     업스케일 모드 변경 (Nearest/Bilinear/Bicubic/Lanczos2/FSR 1.0)\n"
            "  Alt+Shift+I     정수배 스케일링 켜기/끄기\n"
+           "  Alt+Shift+C     비교 모드 (왼쪽: 일반 확대, 오른쪽: 현재 모드)\n"
            "  Alt+Shift+Up    샤프닝 강하게\n"
            "  Alt+Shift+Down  샤프닝 약하게\n"
            "  Alt+Shift+Q     프로그램 종료\n"
@@ -880,6 +912,7 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--mode" && i + 1 < argc) g_settings.mode = std::clamp(_wtoi(argv[++i]), 0, MODE_COUNT - 1);
         else if (a == L"--sharp" && i + 1 < argc) g_settings.sharpness = std::clamp((float)_wtof(argv[++i]), 0.0f, 1.0f);
         else if (a == L"--integer") g_settings.integerScale = true;
+        else if (a == L"--compare") g_settings.compare = true;
     }
 
     // 시스템 커서를 숨기는 데 Magnification API를 사용한다.
