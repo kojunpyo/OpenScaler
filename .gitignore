@@ -4,3 +4,4 @@ out/
 *.exe
 *.obj
 *.pdb
+OpenScaler.ini

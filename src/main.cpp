@@ -82,6 +82,49 @@ struct ShaderParams {
 
 static Settings g_settings;
 
+// 설정 파일: 실행 파일 옆의 OpenScaler.ini. 단축키로 바꾼 설정을 저장했다가 다음 실행 때 불러온다.
+// 비교 모드는 발표/확인용이라 저장하지 않는다.
+static const wchar_t* kModeKeys[MODE_COUNT] = { L"nearest", L"bilinear", L"bicubic", L"lanczos2", L"fsr" };
+static const wchar_t* kSettingsSection = L"Settings";
+static std::wstring g_settingsPath;
+
+static std::wstring GetSettingsPath()
+{
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    std::wstring p(path, n);
+    size_t dot = p.find_last_of(L'.');
+    return (dot == std::wstring::npos ? p : p.substr(0, dot)) + L".ini";
+}
+
+static void LoadSettings()
+{
+    const wchar_t* file = g_settingsPath.c_str();
+    if (GetFileAttributesW(file) == INVALID_FILE_ATTRIBUTES) return;
+
+    wchar_t buf[64];
+    GetPrivateProfileStringW(kSettingsSection, L"Mode", L"", buf, ARRAYSIZE(buf), file);
+    for (int i = 0; i < MODE_COUNT; i++)
+        if (_wcsicmp(buf, kModeKeys[i]) == 0) g_settings.mode = i;
+
+    GetPrivateProfileStringW(kSettingsSection, L"Sharpness", L"", buf, ARRAYSIZE(buf), file);
+    if (buf[0]) g_settings.sharpness = std::clamp((float)_wtof(buf), 0.0f, 1.0f);
+
+    g_settings.integerScale = GetPrivateProfileIntW(kSettingsSection, L"IntegerScale", g_settings.integerScale, file) != 0;
+    g_settings.osdAlways = GetPrivateProfileIntW(kSettingsSection, L"AlwaysShowStatus", g_settings.osdAlways, file) != 0;
+}
+
+static void SaveSettings()
+{
+    const wchar_t* file = g_settingsPath.c_str();
+    wchar_t buf[32];
+    WritePrivateProfileStringW(kSettingsSection, L"Mode", kModeKeys[g_settings.mode], file);
+    swprintf_s(buf, L"%.1f", g_settings.sharpness);
+    WritePrivateProfileStringW(kSettingsSection, L"Sharpness", buf, file);
+    WritePrivateProfileStringW(kSettingsSection, L"IntegerScale", g_settings.integerScale ? L"1" : L"0", file);
+    WritePrivateProfileStringW(kSettingsSection, L"AlwaysShowStatus", g_settings.osdAlways ? L"1" : L"0", file);
+}
+
 // D3D 공용 리소스
 static com_ptr<ID3D11Device> g_device;
 static com_ptr<ID3D11DeviceContext> g_ctx;
@@ -936,6 +979,7 @@ static bool HandleHotkey(int id)
         return false;
     }
     g_osdUntil = Clock::now() + std::chrono::milliseconds(2500);  // 바뀐 설정을 화면에 잠깐 보여 준다
+    if (id != HK_TOGGLE && id != HK_COMPARE) SaveSettings();
     return true;
 }
 
@@ -1002,6 +1046,10 @@ int wmain(int argc, wchar_t** argv)
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
 
+    // 저장된 설정을 먼저 불러오고, 명령줄 옵션이 있으면 그 값으로 덮어쓴다.
+    g_settingsPath = GetSettingsPath();
+    LoadSettings();
+
     // 명령줄 옵션: --target "창 제목 일부" --duration 초 --mode 0~4 --sharp 0~1 --integer
     std::wstring targetTitle;
     double duration = 0;
@@ -1027,6 +1075,8 @@ int wmain(int argc, wchar_t** argv)
         }
 
         PrintHelp();
+        printf("설정 파일: %s\n현재 설정: %s, 샤픈 %.1f, 정수배 %s\n\n", winrt::to_string(g_settingsPath).c_str(),
+               kModeNames[g_settings.mode], g_settings.sharpness, g_settings.integerScale ? "ON" : "OFF");
         InitD3D();
         RegisterHotkeys();
 
