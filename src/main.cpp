@@ -58,7 +58,7 @@ static const char* kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", 
 enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_QUIT };
 
 struct Settings {
-    int mode = MODE_LANCZOS;
+    int mode = MODE_FSR;
     float sharpness = 0.5f;
     bool integerScale = false;
 };
