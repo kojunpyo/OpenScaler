@@ -1,5 +1,9 @@
 # OpenScaler
 
+[![Build](https://github.com/kojunpyo/OpenScaler/actions/workflows/build.yml/badge.svg)](https://github.com/kojunpyo/OpenScaler/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/kojunpyo/OpenScaler)](https://github.com/kojunpyo/OpenScaler/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **창 모드 게임을 실시간으로 캡처해 전체화면으로 업스케일하는 오픈소스 Windows 프로그램**
 
 상용 프로그램 [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/)의 핵심 기능인 "게임 화면 업스케일링"을 직접 구현해 보는 오픈소스소프트웨어 텀 프로젝트입니다.
@@ -125,6 +129,10 @@ OpenScaler는 같은 원리를 오픈소스로 구현하고, 각 단계(화면 �
 
 ## 5. 설치와 실행
 
+### 다운로드
+
+[Releases](https://github.com/kojunpyo/OpenScaler/releases/latest)에서 `OpenScaler-windows-x64.zip`을 받아 압축을 풀면 됩니다. 설치는 필요 없습니다.
+
 ### 사용법
 
 1. 게임을 **창 모드**로, 낮은 해상도로 실행합니다.
@@ -170,6 +178,16 @@ cmake --build build
 
 빌드 결과는 `build/OpenScaler.exe`입니다. 프로젝트 폴더 경로가 아주 길면 MSVC 빌드가 실패할 수 있으니 짧은 경로(예: `C:\dev\OpenScaler`)에 두는 것을 권장합니다.
 
+### 자동 빌드와 배포 (GitHub Actions)
+
+- `main`에 푸시하거나 PR을 올리면 GitHub Actions가 Windows에서 자동으로 빌드합니다. 빌드 결과(zip)는 각 실행 기록의 Artifacts에서 받을 수 있습니다.
+- `v`로 시작하는 태그를 푸시하면 빌드 결과가 GitHub Releases에 자동으로 올라갑니다.
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ---
 
 ## 6. 프로젝트 구조
@@ -183,6 +201,7 @@ OpenScaler/
 │   └── fsr_constants.*    # FSR 상수 계산 (CPU)
 ├── third_party/fsr/       # AMD FidelityFX FSR 1.0 헤더 (MIT, 수정 없음)
 ├── docs/                  # 스크린샷 등 문서 자료
+├── .github/workflows/     # GitHub Actions 자동 빌드, 배포
 ├── CMakeLists.txt         # 빌드 설정
 ├── LICENSE                # MIT 라이선스
 └── README.md
