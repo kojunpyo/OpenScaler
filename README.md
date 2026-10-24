@@ -42,12 +42,12 @@ OpenScaler는 같은 원리를 오픈소스로 구현하고, 각 단계(화면 �
 | 창 캡처 | Windows.Graphics.Capture API로 대상 창을 실시간 캡처 | ✅ 완료 |
 | 클라이언트 영역 추출 | 제목 표시줄과 테두리를 빼고 게임 화면만 확대 | ✅ 완료 |
 | 전체화면 출력 | 클릭이 통과하는 최상위 오버레이 창에 VSync로 출력 | ✅ 완료 |
-| 업스케일 알고리즘 | Nearest / Bilinear / Bicubic(Catmull-Rom) / Lanczos2 | ✅ 완료 |
+| 업스케일 알고리즘 | Nearest / Bilinear / Bicubic(Catmull-Rom) / Lanczos2 / FSR 1.0 | ✅ 완료 |
 | 샤프닝 | 대비 적응형 샤프닝 (AMD CAS의 아이디어를 바탕으로 구현) | ✅ 완료 |
 | 정수배 스케일링 | 픽셀 아트 게임을 위한 정수배 확대 | ✅ 완료 |
 | 마우스 좌표 변환 | 확대된 화면에서 클릭한 위치를 원본 창 좌표로 변환 | ✅ 완료 |
 | 단축키 | 시작/중지, 모드 변경, 샤프닝 조절 | ✅ 완료 |
-| FSR 1.0 (EASU + RCAS) | AMD FidelityFX Super Resolution 1.0 이식 | 🔲 예정 |
+| FSR 1.0 (EASU + RCAS) | AMD FidelityFX Super Resolution 1.0 이식 | ✅ 완료 |
 | 설정 GUI | 대상 창 선택, 옵션 설정 화면 | 🔲 예정 |
 | 설정 저장 | 마지막 설정을 파일에 저장하고 불러오기 | 🔲 예정 |
 | 성능 표시 | 화면 위에 FPS, 처리 시간 표시 | 🔲 예정 |
@@ -89,7 +89,18 @@ OpenScaler는 같은 원리를 오픈소스로 구현하고, 각 단계(화면 �
 | Nearest | 가장 가까운 픽셀을 그대로 복사. 계단 현상이 있지만 가장 빠름 | 픽셀 아트, 레트로 게임 |
 | Bilinear | 주변 2×2 픽셀을 선형 보간. 부드럽지만 흐림 | 비교 기준 |
 | Bicubic | 주변 4×4 픽셀을 3차 곡선으로 보간. Bilinear보다 선명 | 일반 게임 |
-| Lanczos2 | sinc 함수 기반 4×4 보간 + 링잉 억제. 가장 선명 | 일반 게임 (기본값) |
+| Lanczos2 | sinc 함수 기반 4×4 보간 + 링잉 억제 | 일반 게임 (기본값) |
+| FSR 1.0 | AMD의 EASU가 윤곽선 방향을 분석해 보간하고, RCAS로 샤프닝. 윤곽선이 가장 깔끔함 | 일반 게임 (추천) |
+
+640×360 테스트 패턴을 1920×1080(3배)으로 확대한 결과입니다.
+
+![업스케일 알고리즘 비교: Nearest, Lanczos2, FSR 1.0](docs/compare_modes.png)
+
+### FSR 1.0 구현
+
+- 알고리즘 본체는 AMD 공식 헤더(`third_party/fsr`, MIT 라이선스)를 수정 없이 사용합니다.
+- `src/fsr.hlsl`에서 입력 텍스처를 읽는 콜백과 픽셀 셰이더 진입점만 정의하고, 빌드할 때 `fxc`로 미리 컴파일합니다.
+- Pass 1은 EASU(업스케일), Pass 2는 RCAS(샤프닝)로 바뀌며, 샤프닝 강도(0~1)는 RCAS의 단계(stop) 값으로 변환합니다.
 
 ---
 
@@ -131,7 +142,7 @@ OpenScaler.exe --target "창 제목 일부" --mode 3 --sharp 0.5 --integer --dur
 | 옵션 | 설명 |
 |---|---|
 | `--target` | 제목에 이 문자열이 들어간 창을 바로 확대 |
-| `--mode` | 0: Nearest, 1: Bilinear, 2: Bicubic, 3: Lanczos2 |
+| `--mode` | 0: Nearest, 1: Bilinear, 2: Bicubic, 3: Lanczos2, 4: FSR 1.0 |
 | `--sharp` | 샤프닝 강도 (0 ~ 1) |
 | `--integer` | 정수배 스케일링 사용 |
 | `--duration` | 지정한 초가 지나면 자동 종료 |
@@ -158,11 +169,14 @@ cmake --build build
 ```
 OpenScaler/
 ├── src/
-│   ├── main.cpp      # 캡처, 오버레이 창, D3D11 렌더링, 커서 변환, 단축키
-│   └── shaders.h     # HLSL 셰이더 (업스케일, 샤프닝, 커서) - 실행 중에 컴파일
-├── docs/             # 스크린샷 등 문서 자료
-├── CMakeLists.txt    # 빌드 설정
-├── LICENSE           # MIT 라이선스
+│   ├── main.cpp           # 캡처, 오버레이 창, D3D11 렌더링, 커서 변환, 단축키
+│   ├── shaders.h          # HLSL 셰이더 (업스케일, 샤프닝, 커서) - 실행 중에 컴파일
+│   ├── fsr.hlsl           # FSR 1.0 셰이더 진입점 - 빌드할 때 fxc로 컴파일
+│   └── fsr_constants.*    # FSR 상수 계산 (CPU)
+├── third_party/fsr/       # AMD FidelityFX FSR 1.0 헤더 (MIT, 수정 없음)
+├── docs/                  # 스크린샷 등 문서 자료
+├── CMakeLists.txt         # 빌드 설정
+├── LICENSE                # MIT 라이선스
 └── README.md
 ```
 
@@ -174,7 +188,7 @@ OpenScaler/
 |---|---|---|---|
 | 1단계 | 10월 | 주제 선정, 기술 조사, 프로토타입 (캡처 + 업스케일 + 전체화면 출력) | ✅ 완료 |
 | 2단계 | 10월 말 | 마우스 좌표 변환, 커서 그리기 | ✅ 완료 |
-| 3단계 | 11월 초 | FSR 1.0 이식, 알고리즘별 화질/성능 비교 | 🔲 예정 |
+| 3단계 | 11월 초 | FSR 1.0 이식, 알고리즘별 화질/성능 비교 | ✅ FSR 완료 / 비교 진행 중 |
 | 4단계 | 11월 중 | 설정 GUI, 설정 저장, 화면 위 FPS 표시 | 🔲 예정 |
 | 5단계 | 11월 말 | 실제 게임 테스트, 버그 수정, 성능 최적화 | 🔲 예정 |
 | 6단계 | 12월 | 프레임 보간 실험(도전 과제), 문서 정리, 최종 발표 | 🔲 예정 |
@@ -196,7 +210,8 @@ OpenScaler/
 ## 9. 참고 자료
 
 - [Windows.Graphics.Capture 문서 (Microsoft)](https://learn.microsoft.com/windows/uwp/audio-video-camera/screen-capture)
-- [AMD FidelityFX CAS / FSR (GPUOpen)](https://gpuopen.com/fidelityfx-superresolution/) - 샤프닝 아이디어, FSR 이식 예정
+- [AMD FidelityFX CAS / FSR (GPUOpen)](https://gpuopen.com/fidelityfx-superresolution/) - 샤프닝 아이디어
+- [AMD FidelityFX FSR 1.0 소스](https://github.com/GPUOpen-Effects/FidelityFX-FSR) - `third_party/fsr`에 포함
 - [Magpie](https://github.com/Blinue/Magpie) - 같은 목적의 오픈소스 프로젝트. 구조 참고용으로만 살펴봤으며 코드는 가져오지 않았습니다.
 - [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) - 기능 아이디어의 출처
 
@@ -205,3 +220,5 @@ OpenScaler/
 ## 10. 라이선스
 
 이 프로젝트는 [MIT License](LICENSE)로 배포됩니다. 자유롭게 사용, 수정, 배포할 수 있습니다.
+
+`third_party/fsr`의 FSR 1.0 헤더는 AMD의 저작물이며 MIT 라이선스를 따릅니다 ([third_party/fsr/license.txt](third_party/fsr/license.txt)).

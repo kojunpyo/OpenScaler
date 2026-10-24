@@ -3,6 +3,7 @@
 // 흐름: 대상 창 캡처(Windows.Graphics.Capture)
 //       -> 클라이언트 영역만 잘라 복사
 //       -> Pass 1: 업스케일 셰이더 -> Pass 2: 샤프닝 셰이더 -> 커서 그리기
+//          (FSR 1.0 모드에서는 Pass 1이 EASU, Pass 2가 RCAS)
 //       -> 클릭이 통과하는 최상위 전체화면 창에 출력
 //
 // 커서 처리: 확대된 화면 위에 커서가 올라오면 실제 커서는 원본 창의 대응 위치로 옮기고
@@ -36,6 +37,9 @@
 #include <vector>
 
 #include "shaders.h"
+#include "fsr_constants.h"
+#include "PSEasu.h"  // 빌드 때 fxc가 만든 FSR 셰이더 바이트코드
+#include "PSRcas.h"
 
 namespace wgc = winrt::Windows::Graphics::Capture;
 namespace wgd = winrt::Windows::Graphics::DirectX;
@@ -48,8 +52,8 @@ using Clock = std::chrono::steady_clock;
 // 설정
 // ---------------------------------------------------------------------------
 
-enum Mode { MODE_NEAREST, MODE_BILINEAR, MODE_BICUBIC, MODE_LANCZOS, MODE_COUNT };
-static const char* kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2" };
+enum Mode { MODE_NEAREST, MODE_BILINEAR, MODE_BICUBIC, MODE_LANCZOS, MODE_FSR, MODE_COUNT };
+static const char* kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2", "FSR 1.0" };
 
 enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_QUIT };
 
@@ -82,8 +86,11 @@ static com_ptr<ID3D11VertexShader> g_vs;
 static com_ptr<ID3D11PixelShader> g_psScale;
 static com_ptr<ID3D11PixelShader> g_psSharpen;
 static com_ptr<ID3D11PixelShader> g_psCursor;
+static com_ptr<ID3D11PixelShader> g_psEasu;  // FSR 1.0 업스케일
+static com_ptr<ID3D11PixelShader> g_psRcas;  // FSR 1.0 샤프닝
 static com_ptr<ID3D11SamplerState> g_sampler;
 static com_ptr<ID3D11Buffer> g_cbuffer;
+static com_ptr<ID3D11Buffer> g_fsrCbuffer;
 static com_ptr<ID3D11BlendState> g_blendAlpha;   // 일반 커서 픽셀: 알파 블렌딩
 static com_ptr<ID3D11BlendState> g_blendInvert;  // 흑백 커서의 반전 픽셀: 1 - 배경색
 
@@ -197,6 +204,8 @@ static void InitD3D()
     g_psScale = CreatePixelShader("PSScale");
     g_psSharpen = CreatePixelShader("PSSharpen");
     g_psCursor = CreatePixelShader("PSCursor");
+    check_hresult(g_device->CreatePixelShader(g_PSEasu, sizeof(g_PSEasu), nullptr, g_psEasu.put()));
+    check_hresult(g_device->CreatePixelShader(g_PSRcas, sizeof(g_PSRcas), nullptr, g_psRcas.put()));
 
     D3D11_SAMPLER_DESC sd = {};
     sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -210,6 +219,8 @@ static void InitD3D()
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     check_hresult(g_device->CreateBuffer(&bd, nullptr, g_cbuffer.put()));
+    bd.ByteWidth = sizeof(FsrParams);
+    check_hresult(g_device->CreateBuffer(&bd, nullptr, g_fsrCbuffer.put()));
 
     g_blendAlpha = CreateBlend(D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA);
     // 셰이더 출력이 흰색(1)이면 1 - 배경, 검은색(0)이면 배경 그대로
@@ -604,7 +615,7 @@ static void EnsureTexture(com_ptr<ID3D11Texture2D>& tex, com_ptr<ID3D11ShaderRes
     curH = h;
 }
 
-static void SetParams(UINT w, UINT h)
+static void SetParams(UINT w, UINT h, float sharpness)
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
     check_hresult(g_ctx->Map(g_cbuffer.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
@@ -614,14 +625,14 @@ static void SetParams(UINT w, UINT h)
     p->invSrcSize[0] = 1.0f / w;
     p->invSrcSize[1] = 1.0f / h;
     p->mode = g_settings.mode;
-    p->sharpness = g_settings.sharpness;
+    p->sharpness = sharpness;
     g_ctx->Unmap(g_cbuffer.get(), 0);
 }
 
 static void DrawPass(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, ID3D11PixelShader* ps,
-                     ID3D11ShaderResourceView* srv, UINT srcW, UINT srcH)
+                     ID3D11ShaderResourceView* srv, UINT srcW, UINT srcH, float sharpness = -1)
 {
-    SetParams(srcW, srcH);
+    SetParams(srcW, srcH, sharpness < 0 ? g_settings.sharpness : sharpness);
     g_ctx->OMSetRenderTargets(1, &rtv, nullptr);
     g_ctx->RSSetViewports(1, &vp);
     g_ctx->PSSetShader(ps, nullptr, 0);
@@ -715,16 +726,33 @@ static void RenderFrame()
         g_ctx->VSSetShader(g_vs.get(), nullptr, 0);
         ID3D11SamplerState* sampler = g_sampler.get();
         g_ctx->PSSetSamplers(0, 1, &sampler);
-        ID3D11Buffer* cb = g_cbuffer.get();
-        g_ctx->PSSetConstantBuffers(0, 1, &cb);
+        ID3D11Buffer* cbs[2] = { g_cbuffer.get(), g_fsrCbuffer.get() };
+        g_ctx->PSSetConstantBuffers(0, 2, cbs);
 
-        // Pass 1: 업스케일
+        const bool fsr = g_settings.mode == MODE_FSR;
+        if (fsr) {
+            // 샤프닝 1.0 -> RCAS 0스톱(최대), 0.5 -> 1스톱, 0.0에 가까울수록 약하게
+            FsrParams fp = {};
+            ComputeFsrParams(fp, (float)s->srcW, (float)s->srcH, (float)dstW, (float)dstH,
+                             (1.0f - g_settings.sharpness) * 2.0f);
+            fp.outputOffset[0] = (int32_t)offX;
+            fp.outputOffset[1] = (int32_t)offY;
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            check_hresult(g_ctx->Map(g_fsrCbuffer.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
+            memcpy(mapped.pData, &fp, sizeof(fp));
+            g_ctx->Unmap(g_fsrCbuffer.get(), 0);
+        }
+
+        // Pass 1: 업스케일 (FSR 모드는 EASU)
         D3D11_VIEWPORT vp1 = { 0, 0, (float)dstW, (float)dstH, 0, 1 };
-        DrawPass(s->midRtv.get(), vp1, g_psScale.get(), s->srcSrv.get(), s->srcW, s->srcH);
+        DrawPass(s->midRtv.get(), vp1, fsr ? g_psEasu.get() : g_psScale.get(), s->srcSrv.get(), s->srcW, s->srcH);
 
-        // Pass 2: 샤프닝하면서 백버퍼 중앙에 출력
+        // Pass 2: 샤프닝하면서 백버퍼 중앙에 출력 (FSR 모드는 RCAS, 샤프닝 0이면 그대로 복사)
         D3D11_VIEWPORT vp2 = { offX, offY, (float)dstW, (float)dstH, 0, 1 };
-        DrawPass(s->backBufferRtv.get(), vp2, g_psSharpen.get(), s->midSrv.get(), dstW, dstH);
+        if (fsr && g_settings.sharpness > 0)
+            DrawPass(s->backBufferRtv.get(), vp2, g_psRcas.get(), s->midSrv.get(), dstW, dstH);
+        else
+            DrawPass(s->backBufferRtv.get(), vp2, g_psSharpen.get(), s->midSrv.get(), dstW, dstH, fsr ? 0.0f : -1.0f);
 
         // Pass 3: 커서
         DrawCursor(s);
@@ -823,7 +851,7 @@ static void PrintHelp()
     printf("OpenScaler 프로토타입\n"
            "------------------------------------------------------------\n"
            "  Alt+Shift+S     현재 활성 창 스케일링 시작/중지\n"
-           "  Alt+Shift+M     업스케일 모드 변경 (Nearest/Bilinear/Bicubic/Lanczos2)\n"
+           "  Alt+Shift+M     업스케일 모드 변경 (Nearest/Bilinear/Bicubic/Lanczos2/FSR 1.0)\n"
            "  Alt+Shift+I     정수배 스케일링 켜기/끄기\n"
            "  Alt+Shift+Up    샤프닝 강하게\n"
            "  Alt+Shift+Down  샤프닝 약하게\n"
@@ -842,7 +870,7 @@ int wmain(int argc, wchar_t** argv)
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
 
-    // 명령줄 옵션: --target "창 제목 일부" --duration 초 --mode 0~3 --sharp 0~1 --integer
+    // 명령줄 옵션: --target "창 제목 일부" --duration 초 --mode 0~4 --sharp 0~1 --integer
     std::wstring targetTitle;
     double duration = 0;
     for (int i = 1; i < argc; i++) {
