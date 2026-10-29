@@ -57,7 +57,7 @@ using Clock = std::chrono::steady_clock;
 enum Mode { MODE_NEAREST, MODE_BILINEAR, MODE_BICUBIC, MODE_LANCZOS, MODE_FSR, MODE_COUNT };
 static const char* kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2", "FSR 1.0" };
 
-enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_QUIT };
+enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_CURSOR_SPEED, HK_QUIT };
 
 struct Settings {
     int mode = MODE_FSR;
@@ -65,6 +65,7 @@ struct Settings {
     bool integerScale = false;
     bool compare = false;  // 화면 분할 비교: 왼쪽은 Bilinear(일반 확대), 오른쪽은 현재 모드
     bool osdAlways = false; // 화면 위 상태 표시를 항상 켜 둔다 (끄면 설정을 바꿀 때만 잠깐 표시)
+    bool adjustCursorSpeed = false;  // 확대 중 Windows 마우스 속도를 배율만큼 낮춰 화면상 커서 속도를 원래대로 맞춘다
 };
 
 // HLSL cbuffer Params와 같은 레이아웃 (16바이트 정렬)
@@ -112,6 +113,8 @@ static void LoadSettings()
 
     g_settings.integerScale = GetPrivateProfileIntW(kSettingsSection, L"IntegerScale", g_settings.integerScale, file) != 0;
     g_settings.osdAlways = GetPrivateProfileIntW(kSettingsSection, L"AlwaysShowStatus", g_settings.osdAlways, file) != 0;
+    g_settings.adjustCursorSpeed =
+        GetPrivateProfileIntW(kSettingsSection, L"AdjustCursorSpeed", g_settings.adjustCursorSpeed, file) != 0;
 }
 
 static void SaveSettings()
@@ -123,6 +126,68 @@ static void SaveSettings()
     WritePrivateProfileStringW(kSettingsSection, L"Sharpness", buf, file);
     WritePrivateProfileStringW(kSettingsSection, L"IntegerScale", g_settings.integerScale ? L"1" : L"0", file);
     WritePrivateProfileStringW(kSettingsSection, L"AlwaysShowStatus", g_settings.osdAlways ? L"1" : L"0", file);
+    WritePrivateProfileStringW(kSettingsSection, L"AdjustCursorSpeed", g_settings.adjustCursorSpeed ? L"1" : L"0", file);
+}
+
+// ---------------------------------------------------------------------------
+// 커서 속도 보정
+// 확대 중에는 실제 커서가 작은 원본 창 안에서 움직이므로 화면상 속도가 배율만큼 빨라진다.
+// 옵션을 켜면 그동안 Windows 마우스 속도(1~20단계)를 낮췄다가 끝나면 되돌린다.
+// 레지스트리에는 쓰지 않으므로 로그아웃하면 원래대로 돌아오고, 비정상 종료에 대비해
+// 원래 값을 설정 파일(SavedMouseSpeed)에 적어 두었다가 다음 실행 때 복구한다.
+// ---------------------------------------------------------------------------
+
+// 단계별 속도 배율 (포인터 정밀도 향상이 꺼진 기준, 10단계가 1배)
+static const float kMouseSpeedMultiplier[21] = {
+    0, 1 / 32.f, 1 / 16.f, 1 / 8.f, 2 / 8.f, 3 / 8.f, 4 / 8.f, 5 / 8.f, 6 / 8.f, 7 / 8.f, 1.0f,
+    1.25f, 1.5f, 1.75f, 2.0f, 2.25f, 2.5f, 2.75f, 3.0f, 3.25f, 3.5f };
+static int g_originalMouseSpeed = 0;  // 0이면 바꾸지 않은 상태
+static int g_appliedMouseSpeed = 0;
+
+static void SetMouseSpeed(int speed)
+{
+    SystemParametersInfoW(SPI_SETMOUSESPEED, 0, reinterpret_cast<PVOID>(static_cast<INT_PTR>(speed)), 0);
+}
+
+static void RestoreMouseSpeed()
+{
+    if (!g_originalMouseSpeed) return;
+    SetMouseSpeed(g_originalMouseSpeed);
+    g_originalMouseSpeed = 0;
+    g_appliedMouseSpeed = 0;
+    WritePrivateProfileStringW(kSettingsSection, L"SavedMouseSpeed", nullptr, g_settingsPath.c_str());
+}
+
+// 화면상 속도가 원래와 같아지도록, 원래 배율 / 확대 배율에 가장 가까운 단계로 바꾼다.
+static void ApplyMouseSpeed(float scale)
+{
+    if (!g_originalMouseSpeed) {
+        int current = 10;
+        SystemParametersInfoW(SPI_GETMOUSESPEED, 0, &current, 0);
+        g_originalMouseSpeed = std::clamp(current, 1, 20);
+        WritePrivateProfileStringW(kSettingsSection, L"SavedMouseSpeed", std::to_wstring(g_originalMouseSpeed).c_str(),
+                                   g_settingsPath.c_str());
+    }
+
+    float target = kMouseSpeedMultiplier[g_originalMouseSpeed] / scale;
+    int best = 1;
+    for (int i = 2; i <= 20; i++)
+        if (std::abs(kMouseSpeedMultiplier[i] - target) < std::abs(kMouseSpeedMultiplier[best] - target)) best = i;
+
+    if (best != g_appliedMouseSpeed) {
+        SetMouseSpeed(best);
+        g_appliedMouseSpeed = best;
+    }
+}
+
+// 지난번에 속도를 바꾼 채로 비정상 종료됐다면 원래 값으로 되돌린다.
+static void RecoverMouseSpeed()
+{
+    int saved = GetPrivateProfileIntW(kSettingsSection, L"SavedMouseSpeed", 0, g_settingsPath.c_str());
+    if (saved < 1 || saved > 20) return;
+    g_originalMouseSpeed = saved;
+    RestoreMouseSpeed();
+    printf("지난 실행에서 바뀐 마우스 속도를 원래 값(%d)으로 되돌렸습니다.\n", saved);
 }
 
 // D3D 공용 리소스
@@ -546,6 +611,7 @@ static void StopScaling()
         ReleaseCursor(g_scaling, SrcToDst(g_scaling, ClampToRect(p, g_scaling->srcScreen)));
     }
     ShowSystemCursor(true);
+    RestoreMouseSpeed();
     if (g_scaling->session) g_scaling->session.Close();
     if (g_scaling->framePool) g_scaling->framePool.Close();
     g_d2dCtx->SetTarget(nullptr);
@@ -798,8 +864,9 @@ static void DrawOsd(ScalingSession* s)
 
     if (showStatus) {
         wchar_t text[256];
-        swprintf_s(text, L"%hs  ·  샤픈 %.1f  ·  정수배 %ls\n%u×%u → %u×%u  ·  출력 %.0f fps  ·  캡처 %.0f fps",
+        swprintf_s(text, L"%hs  ·  샤픈 %.1f  ·  정수배 %ls  ·  커서 속도 보정 %ls\n%u×%u → %u×%u  ·  출력 %.0f fps  ·  캡처 %.0f fps",
                    kModeNames[g_settings.mode], g_settings.sharpness, g_settings.integerScale ? L"ON" : L"OFF",
+                   g_settings.adjustCursorSpeed ? L"ON" : L"OFF",
                    s->srcW, s->srcH, s->midW, s->midH, s->outputFps, s->captureFps);
         DrawLabel(s, text, left + margin, top + margin, false);
     }
@@ -853,6 +920,12 @@ static void RenderFrame()
         s->srcScreen = { visible.left, visible.top, visible.left + (LONG)s->srcW, visible.top + (LONG)s->srcH };
     UpdateLayout(s);
     UpdateCursor(s);
+
+    // 커서가 확대 화면 안에 있을 때만 마우스 속도를 낮춘다.
+    if (g_settings.adjustCursorSpeed && s->cursorMapped && s->layoutValid)
+        ApplyMouseSpeed(float(s->dstScreen.right - s->dstScreen.left) / (s->srcScreen.right - s->srcScreen.left));
+    else
+        RestoreMouseSpeed();
 
     // 지난 프레임의 Direct2D 그리기가 남긴 파이프라인 상태를 지우고 시작한다.
     g_ctx->ClearState();
@@ -936,11 +1009,14 @@ static void PrintStatus()
     double sec = std::chrono::duration<double>(now - g_scaling->statTime).count();
     if (sec < 1.0) return;
 
-    printf("\r  %ux%u -> %ux%u | 모드: %-8s | 샤픈: %.1f | 정수배: %-3s | 비교: %-3s | 커서: %-4s | 캡처 %3.0f fps | 출력 %3.0f fps   ",
+    int currentMouseSpeed = 0;
+    SystemParametersInfoW(SPI_GETMOUSESPEED, 0, &currentMouseSpeed, 0);
+    printf("\r  %ux%u -> %ux%u | 모드: %-8s | 샤픈: %.1f | 정수배: %-3s | 비교: %-3s | 커서: %-4s | 마우스 속도: %2d | 캡처 %3.0f fps | 출력 %3.0f fps   ",
            g_scaling->srcW, g_scaling->srcH, g_scaling->midW, g_scaling->midH,
            kModeNames[g_settings.mode], g_settings.sharpness, g_settings.integerScale ? "ON" : "OFF",
            g_settings.compare ? "ON" : "OFF",
            g_scaling->cursorMapped ? "변환" : "일반",
+           currentMouseSpeed,
            g_scaling->capturedFrames / sec, g_scaling->presentedFrames / sec);
     fflush(stdout);
     g_scaling->captureFps = g_scaling->capturedFrames / sec;
@@ -969,6 +1045,9 @@ static bool HandleHotkey(int id)
     case HK_OSD:
         g_settings.osdAlways = !g_settings.osdAlways;
         break;
+    case HK_CURSOR_SPEED:
+        g_settings.adjustCursorSpeed = !g_settings.adjustCursorSpeed;
+        break;
     case HK_SHARP_UP:
         g_settings.sharpness = std::min(1.0f, g_settings.sharpness + 0.1f);
         break;
@@ -990,7 +1069,8 @@ static void RegisterHotkeys()
         { HK_TOGGLE, 'S', "Alt+Shift+S" },        { HK_MODE, 'M', "Alt+Shift+M" },
         { HK_INTEGER, 'I', "Alt+Shift+I" },       { HK_SHARP_UP, VK_UP, "Alt+Shift+Up" },
         { HK_SHARP_DOWN, VK_DOWN, "Alt+Shift+Down" }, { HK_COMPARE, 'C', "Alt+Shift+C" },
-        { HK_OSD, 'O', "Alt+Shift+O" },           { HK_QUIT, 'Q', "Alt+Shift+Q" },
+        { HK_OSD, 'O', "Alt+Shift+O" },           { HK_CURSOR_SPEED, 'P', "Alt+Shift+P" },
+        { HK_QUIT, 'Q', "Alt+Shift+Q" },
     };
     for (auto& k : keys) {
         if (!RegisterHotKey(nullptr, k.id, mods, k.vk))
@@ -1017,6 +1097,7 @@ static HWND FindWindowByTitle(const std::wstring& needle)
 static BOOL WINAPI ConsoleCtrlHandler(DWORD)
 {
     if (g_systemCursorHidden) MagShowSystemCursor(TRUE);
+    RestoreMouseSpeed();
     return FALSE;
 }
 
@@ -1029,6 +1110,7 @@ static void PrintHelp()
            "  Alt+Shift+I     정수배 스케일링 켜기/끄기\n"
            "  Alt+Shift+C     비교 모드 (왼쪽: 일반 확대, 오른쪽: 현재 모드)\n"
            "  Alt+Shift+O     화면 위 상태 표시 항상 켜기/끄기\n"
+           "  Alt+Shift+P     커서 속도 보정 켜기/끄기 (확대 중 마우스 속도를 배율만큼 낮춤)\n"
            "  Alt+Shift+Up    샤프닝 강하게\n"
            "  Alt+Shift+Down  샤프닝 약하게\n"
            "  Alt+Shift+Q     프로그램 종료\n"
@@ -1049,6 +1131,7 @@ int wmain(int argc, wchar_t** argv)
     // 저장된 설정을 먼저 불러오고, 명령줄 옵션이 있으면 그 값으로 덮어쓴다.
     g_settingsPath = GetSettingsPath();
     LoadSettings();
+    RecoverMouseSpeed();
 
     // 명령줄 옵션: --target "창 제목 일부" --duration 초 --mode 0~4 --sharp 0~1 --integer
     std::wstring targetTitle;
@@ -1061,6 +1144,7 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--sharp" && i + 1 < argc) g_settings.sharpness = std::clamp((float)_wtof(argv[++i]), 0.0f, 1.0f);
         else if (a == L"--integer") g_settings.integerScale = true;
         else if (a == L"--compare") g_settings.compare = true;
+        else if (a == L"--cursor-speed") g_settings.adjustCursorSpeed = true;
     }
 
     // 시스템 커서를 숨기는 데 Magnification API를 사용한다.
@@ -1125,6 +1209,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     ShowSystemCursor(true);
+    RestoreMouseSpeed();
     MagUninitialize();
     return exitCode;
 }
