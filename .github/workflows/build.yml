@@ -32,6 +32,8 @@ jobs:
           New-Item -ItemType Directory dist/OpenScaler | Out-Null
           Copy-Item build/OpenScaler.exe, README.md, LICENSE dist/OpenScaler/
           Copy-Item third_party/fsr/license.txt dist/OpenScaler/LICENSE-AMD-FSR.txt
+          Copy-Item third_party/imgui/LICENSE.txt dist/OpenScaler/LICENSE-ImGui.txt
+          Copy-Item third_party/galmuri/OFL.md dist/OpenScaler/LICENSE-Galmuri-OFL.md
           Compress-Archive -Path dist/OpenScaler -DestinationPath dist/OpenScaler-windows-x64.zip
 
       - uses: actions/upload-artifact@v4

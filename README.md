@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" width="160" alt="OpenScaler 로고"></p>
+
 # OpenScaler
 
 [![Build](https://github.com/kojunpyo/OpenScaler/actions/workflows/build.yml/badge.svg)](https://github.com/kojunpyo/OpenScaler/actions/workflows/build.yml)
@@ -54,7 +56,7 @@ OpenScaler는 같은 원리를 오픈소스로 구현하고, 각 단계(화면 �
 | 커서 속도 보정 (옵션) | 확대 중 Windows 마우스 속도를 배율만큼 낮춰 화면상 커서 속도를 원래대로 유지 | ✅ 완료 |
 | 단축키 | 시작/중지, 모드 변경, 샤프닝 조절 | ✅ 완료 |
 | FSR 1.0 (EASU + RCAS) | AMD FidelityFX Super Resolution 1.0 이식 | ✅ 완료 |
-| 설정 GUI | 대상 창 선택, 옵션 설정 화면 | 🔲 예정 |
+| 설정 창 (GUI) | 대상 창 선택, 시작/중지, 실시간 상태, 모든 옵션을 한 화면에서 설정 | ✅ 완료 |
 | 설정 저장 | 단축키로 바꾼 설정을 `OpenScaler.ini`에 저장하고 다음 실행 때 불러오기 | ✅ 완료 |
 | 화면 위 상태 표시 | 설정을 바꾸면 모드, 샤프닝, 해상도, FPS를 화면 구석에 잠깐 표시 (항상 켜기 가능) | ✅ 완료 |
 | 프레임 보간 (실험) | 두 프레임 사이에 중간 프레임을 만들어 FPS 향상 | 🔲 도전 과제 |
@@ -136,9 +138,26 @@ OpenScaler는 같은 원리를 오픈소스로 구현하고, 각 단계(화면 �
 
 ### 사용법
 
-1. 게임을 **창 모드**로, 낮은 해상도로 실행합니다.
-2. `OpenScaler.exe`를 실행합니다.
-3. 게임 창을 클릭해 활성화한 뒤 **Alt+Shift+S**를 누릅니다.
+1. 게임을 **창 모드**로, 모니터보다 낮은 해상도(예: 1280×720)로 실행합니다.
+2. `OpenScaler.exe`를 실행하면 설정 창이 열립니다.
+3. **대상 창** 목록에서 게임을 고르고 **확대 시작**을 누릅니다.
+   게임 창을 클릭한 뒤 **Alt+Shift+S**를 눌러도 됩니다.
+4. 확대 화면이 설정 창을 가리면 **Alt+Shift+S**로 중지합니다. 설정 창을 닫으면 프로그램이 종료됩니다.
+
+![설정 창](docs/gui.png)
+
+설정 창에서 알고리즘, 샤프닝, 정수배, 비교 모드, 상태 표시, 커서 속도 보정을 바로 바꿀 수 있고, 바꾼 값은 자동 저장됩니다.
+설정 창은 흰 바탕에 연분홍 픽셀 스타일입니다. 가장 자주 쓰는 대상 창 구역은 분홍으로 강조하고, 나머지 설정 구역은 회색 단계로 눈에 덜 띄게 했습니다. 글꼴은 픽셀 글꼴 [Galmuri](https://github.com/quiple/galmuri)(SIL OFL 1.1)를 12px의 정수 배 크기로 써서 각진 모양을 유지하고,
+옵션 이름은 굵은 Galmuri11 Bold, 설명 글은 얇은 Galmuri11 Condensed로 구분합니다.
+
+### 로고
+
+<img src="assets/logo.png" width="96" align="right" alt="로고">
+
+연분홍 배경 위의 하얀 행성 고리는 OpenScaler의 첫 글자 **O**를, 30도로 기울어진 진한 분홍색 선은 업스케일 전후의 경계를 뜻합니다.
+선 왼쪽은 노이즈 낀 저해상도 이미지, 오른쪽은 선명한 이미지입니다.
+로고와 exe 아이콘은 `tools/make_icon.ps1`로 만들며, 실행하면 `assets/logo.png`와 `assets/openscaler.ico`가 다시 생성됩니다.
+확대 중에는 해상도와 FPS가 실시간으로 표시됩니다. 게임 중에는 아래 단축키로도 조작할 수 있습니다.
 
 | 단축키 | 기능 |
 |---|---|
@@ -181,6 +200,8 @@ OpenScaler.exe --target "창 제목 일부" --mode 3 --sharp 0.5 --integer --dur
 | `--integer` | 정수배 스케일링 사용 |
 | `--compare` | 비교 모드로 시작 |
 | `--cursor-speed` | 커서 속도 보정 켜기 |
+| `--no-gui` | 설정 창 없이 실행 (단축키로만 조작) |
+| `--console` | 로그를 보여 주는 콘솔 창 열기 (디버깅용) |
 | `--duration` | 지정한 초가 지나면 자동 종료 |
 
 ### 빌드 방법
@@ -215,11 +236,17 @@ git push origin v0.1.0
 ```
 OpenScaler/
 ├── src/
-│   ├── main.cpp           # 캡처, 오버레이 창, D3D11 렌더링, 커서 변환, 단축키
+│   ├── main.cpp           # 캡처, 오버레이 창, D3D11 렌더링, 커서 변환, 단축키, 메인 루프
+│   ├── app.h              # main.cpp와 설정 창이 함께 쓰는 설정과 기능
+│   ├── gui.cpp / gui.h    # 설정 창 (Dear ImGui)
 │   ├── shaders.h          # HLSL 셰이더 (업스케일, 샤프닝, 커서) - 실행 중에 컴파일
 │   ├── fsr.hlsl           # FSR 1.0 셰이더 진입점 - 빌드할 때 fxc로 컴파일
 │   └── fsr_constants.*    # FSR 상수 계산 (CPU)
 ├── third_party/fsr/       # AMD FidelityFX FSR 1.0 헤더 (MIT, 수정 없음)
+├── third_party/imgui/     # Dear ImGui 1.91.5 (MIT, 수정 없음)
+├── third_party/galmuri/   # 픽셀 글꼴 Galmuri11 Bold/Condensed (SIL OFL 1.1, 수정 없음) - exe에 리소스로 포함
+├── assets/                # 로고(logo.png), exe 아이콘(openscaler.ico)
+├── tools/make_icon.ps1    # 로고와 아이콘 생성 스크립트
 ├── docs/                  # 스크린샷 등 문서 자료
 ├── .github/workflows/     # GitHub Actions 자동 빌드, 배포
 ├── CMakeLists.txt         # 빌드 설정
@@ -236,7 +263,7 @@ OpenScaler/
 | 1단계 | 10월 | 주제 선정, 기술 조사, 프로토타입 (캡처 + 업스케일 + 전체화면 출력) | ✅ 완료 |
 | 2단계 | 10월 말 | 마우스 좌표 변환, 커서 그리기 | ✅ 완료 |
 | 3단계 | 11월 초 | FSR 1.0 이식, 알고리즘별 화질/성능 비교 | ✅ FSR 완료 / 비교 진행 중 |
-| 4단계 | 11월 중 | 설정 GUI, 설정 저장, 화면 위 FPS 표시 | 🟡 상태 표시, 설정 저장 완료 / GUI 예정 |
+| 4단계 | 11월 중 | 설정 GUI, 설정 저장, 화면 위 FPS 표시 | ✅ 완료 |
 | 5단계 | 11월 말 | 실제 게임 테스트, 버그 수정, 성능 최적화 | 🔲 예정 |
 | 6단계 | 12월 | 프레임 보간 실험(도전 과제), 문서 정리, 최종 발표 | 🔲 예정 |
 
@@ -272,3 +299,6 @@ OpenScaler/
 이 프로젝트는 [MIT License](LICENSE)로 배포됩니다. 자유롭게 사용, 수정, 배포할 수 있습니다.
 
 `third_party/fsr`의 FSR 1.0 헤더는 AMD의 저작물이며 MIT 라이선스를 따릅니다 ([third_party/fsr/license.txt](third_party/fsr/license.txt)).
+`third_party/imgui`의 Dear ImGui는 Omar Cornut의 저작물이며 MIT 라이선스를 따릅니다 ([third_party/imgui/LICENSE.txt](third_party/imgui/LICENSE.txt)).
+`third_party/galmuri`의 Galmuri11 Bold와 Galmuri11 Condensed는 이민서(quiple)의 저작물이며 SIL Open Font License 1.1을 따릅니다 ([third_party/galmuri/OFL.md](third_party/galmuri/OFL.md)).
+원작자 설명에 따르면 이 두 글꼴의 글리프는 모두 원작자의 창작물이라, 다른 게임 글꼴의 저작권 문제 없이 쓸 수 있습니다.

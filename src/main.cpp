@@ -38,6 +38,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "app.h"
+#include "gui.h"
 #include "shaders.h"
 #include "fsr_constants.h"
 #include "PSEasu.h"  // 빌드 때 fxc가 만든 FSR 셰이더 바이트코드
@@ -54,19 +56,9 @@ using Clock = std::chrono::steady_clock;
 // 설정
 // ---------------------------------------------------------------------------
 
-enum Mode { MODE_NEAREST, MODE_BILINEAR, MODE_BICUBIC, MODE_LANCZOS, MODE_FSR, MODE_COUNT };
-static const char* kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2", "FSR 1.0" };
+const char* const kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2", "FSR 1.0" };
 
 enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_CURSOR_SPEED, HK_QUIT };
-
-struct Settings {
-    int mode = MODE_FSR;
-    float sharpness = 0.5f;
-    bool integerScale = false;
-    bool compare = false;  // 화면 분할 비교: 왼쪽은 Bilinear(일반 확대), 오른쪽은 현재 모드
-    bool osdAlways = false; // 화면 위 상태 표시를 항상 켜 둔다 (끄면 설정을 바꿀 때만 잠깐 표시)
-    bool adjustCursorSpeed = false;  // 확대 중 Windows 마우스 속도를 배율만큼 낮춰 화면상 커서 속도를 원래대로 맞춘다
-};
 
 // HLSL cbuffer Params와 같은 레이아웃 (16바이트 정렬)
 struct ShaderParams {
@@ -122,7 +114,7 @@ static void SaveSettings()
     const wchar_t* file = g_settingsPath.c_str();
     wchar_t buf[32];
     WritePrivateProfileStringW(kSettingsSection, L"Mode", kModeKeys[g_settings.mode], file);
-    swprintf_s(buf, L"%.1f", g_settings.sharpness);
+    swprintf_s(buf, L"%.2f", g_settings.sharpness);
     WritePrivateProfileStringW(kSettingsSection, L"Sharpness", buf, file);
     WritePrivateProfileStringW(kSettingsSection, L"IntegerScale", g_settings.integerScale ? L"1" : L"0", file);
     WritePrivateProfileStringW(kSettingsSection, L"AlwaysShowStatus", g_settings.osdAlways ? L"1" : L"0", file);
@@ -628,6 +620,9 @@ static void StartScaling(HWND target)
 {
     StopScaling();
     if (!target || !IsWindow(target)) return;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(target, &pid);
+    if (pid == GetCurrentProcessId()) return;  // OpenScaler 자신의 창은 확대하지 않는다
 
     wchar_t title[256] = {};
     GetWindowTextW(target, title, ARRAYSIZE(title));
@@ -1031,7 +1026,12 @@ static bool HandleHotkey(int id)
     switch (id) {
     case HK_TOGGLE:
         if (g_scaling) StopScaling();
-        else StartScaling(GetForegroundWindow());
+        else {
+            // 설정 창이 맨 앞에 있으면 설정 창에서 고른 창을 확대한다.
+            HWND target = GetForegroundWindow();
+            if (target == GuiHwnd()) target = GuiSelectedWindow();
+            StartScaling(target);
+        }
         break;
     case HK_MODE:
         g_settings.mode = (g_settings.mode + 1) % MODE_COUNT;
@@ -1057,9 +1057,39 @@ static bool HandleHotkey(int id)
     case HK_QUIT:
         return false;
     }
-    g_osdUntil = Clock::now() + std::chrono::milliseconds(2500);  // 바뀐 설정을 화면에 잠깐 보여 준다
-    if (id != HK_TOGGLE && id != HK_COMPARE) SaveSettings();
+    if (id != HK_TOGGLE) AppSettingsChanged();
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// 설정 창(gui.cpp)에서 쓰는 기능 (app.h)
+// ---------------------------------------------------------------------------
+
+Settings& AppSettings() { return g_settings; }
+
+void AppSettingsChanged()
+{
+    g_osdUntil = Clock::now() + std::chrono::milliseconds(2500);  // 바뀐 설정을 화면에 잠깐 보여 준다
+    SaveSettings();
+}
+
+void AppStartScaling(HWND target) { StartScaling(target); }
+void AppStopScaling() { StopScaling(); }
+const std::wstring& AppSettingsPath() { return g_settingsPath; }
+
+ScalingStatus AppGetStatus()
+{
+    ScalingStatus st;
+    if (!g_scaling) return st;
+    st.active = true;
+    st.target = g_scaling->target;
+    st.srcW = g_scaling->srcW;
+    st.srcH = g_scaling->srcH;
+    st.dstW = g_scaling->midW;
+    st.dstH = g_scaling->midH;
+    st.outputFps = g_scaling->outputFps;
+    st.captureFps = g_scaling->captureFps;
+    return st;
 }
 
 static void RegisterHotkeys()
@@ -1134,11 +1164,22 @@ int wmain(int argc, wchar_t** argv)
     RecoverMouseSpeed();
 
     // 명령줄 옵션: --target "창 제목 일부" --duration 초 --mode 0~4 --sharp 0~1 --integer
+    //             --no-gui (설정 창 없이 실행) --console (로그를 보여 줄 콘솔 창 열기)
     std::wstring targetTitle;
     double duration = 0;
+    bool useGui = true;
     for (int i = 1; i < argc; i++) {
         std::wstring a = argv[i];
         if (a == L"--target" && i + 1 < argc) targetTitle = argv[++i];
+        else if (a == L"--no-gui") useGui = false;
+        else if (a == L"--console") {
+            // GUI 프로그램이라 기본으로는 콘솔이 없다. 디버깅할 때만 따로 연다.
+            AllocConsole();
+            FILE* f = nullptr;
+            freopen_s(&f, "CONOUT$", "w", stdout);
+            freopen_s(&f, "CONOUT$", "w", stderr);
+            SetConsoleOutputCP(CP_UTF8);
+        }
         else if (a == L"--duration" && i + 1 < argc) duration = _wtof(argv[++i]);
         else if (a == L"--mode" && i + 1 < argc) g_settings.mode = std::clamp(_wtoi(argv[++i]), 0, MODE_COUNT - 1);
         else if (a == L"--sharp" && i + 1 < argc) g_settings.sharpness = std::clamp((float)_wtof(argv[++i]), 0.0f, 1.0f);
@@ -1154,7 +1195,8 @@ int wmain(int argc, wchar_t** argv)
     int exitCode = 0;
     try {
         if (!wgc::GraphicsCaptureSession::IsSupported()) {
-            printf("이 시스템은 Windows.Graphics.Capture를 지원하지 않습니다 (Windows 10 1903 이상 필요).\n");
+            MessageBoxW(nullptr, L"이 시스템은 화면 캡처(Windows.Graphics.Capture)를 지원하지 않습니다.\n"
+                                 L"Windows 10 1903 이상이 필요합니다.", L"OpenScaler", MB_ICONERROR);
             return 1;
         }
 
@@ -1163,6 +1205,10 @@ int wmain(int argc, wchar_t** argv)
                kModeNames[g_settings.mode], g_settings.sharpness, g_settings.integerScale ? "ON" : "OFF");
         InitD3D();
         RegisterHotkeys();
+        if (useGui && !GuiCreate(g_device.get(), g_ctx.get())) {
+            printf("설정 창을 만들지 못했습니다. 단축키로만 사용할 수 있습니다.\n");
+            useGui = false;
+        }
 
         if (!targetTitle.empty()) {
             HWND hwnd = FindWindowByTitle(targetTitle);
@@ -1184,6 +1230,7 @@ int wmain(int argc, wchar_t** argv)
                 DispatchMessageW(&msg);
             }
             if (!running) break;
+            if (useGui && !GuiIsOpen()) break;  // 설정 창을 닫으면 종료
 
             if (duration > 0 && std::chrono::duration<double>(Clock::now() - startTime).count() > duration) break;
 
@@ -1196,15 +1243,21 @@ int wmain(int argc, wchar_t** argv)
                 WaitForSingleObjectEx(g_scaling->frameWaitable, 100, TRUE);
                 RenderFrame();
                 PrintStatus();
+                if (useGui) GuiRender(true);  // 확대 화면 속도에 영향이 없도록 가끔만 그린다
+            } else if (useGui && GuiIsVisible()) {
+                GuiRender(false);  // 수직동기에 맞춰 그리므로 바쁜 루프가 되지 않는다
             } else {
-                // 스케일링 중이 아니면 메시지가 올 때까지 대기
+                // 그릴 것이 없으면 메시지가 올 때까지 대기
                 MsgWaitForMultipleObjects(0, nullptr, FALSE, duration > 0 ? 100 : INFINITE, QS_ALLINPUT);
             }
         }
 
         StopScaling();
+        GuiDestroy();
     } catch (const winrt::hresult_error& e) {
+        std::string text = "오류가 발생했습니다.\n\n" + winrt::to_string(e.message());
         printf("\n오류: 0x%08X %s\n", (unsigned)e.code(), winrt::to_string(e.message()).c_str());
+        MessageBoxA(nullptr, text.c_str(), "OpenScaler", MB_ICONERROR);
         exitCode = 1;
     }
 

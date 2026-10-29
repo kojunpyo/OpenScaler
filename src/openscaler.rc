@@ -1,0 +1,6 @@
+#include "resource.h"
+
+// 파일 경로는 CMakeLists.txt의 리소스 include 디렉터리(assets, third_party/galmuri) 기준
+IDI_APP ICON "openscaler.ico"
+IDR_PIXEL_FONT RCDATA "Galmuri11-Bold.ttf"
+IDR_PIXEL_FONT_THIN RCDATA "Galmuri11-Condensed.ttf"
