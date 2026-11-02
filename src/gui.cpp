@@ -7,6 +7,8 @@
 
 #include "gui.h"
 #include "app.h"
+#include "game_profile.h"
+#include "rife.h"
 #include "resource.h"
 
 #include <dwmapi.h>
@@ -117,7 +119,24 @@ const char* kSharpnessDesc = "확대로 흐려진 윤곽선을 또렷하게 해�
 const char* kIntegerDesc = "2배, 3배처럼 정수 배율로만 키워 픽셀이 고르게 커져요. 픽셀 아트용, 가장자리에 여백이 생길 수 있어요.";
 const char* kFpsFormat = "출력 %.0f fps · 캡처 %.0f fps";
 const char* kFooter = "설정은 OpenScaler.ini에 자동 저장돼요";
-const char* kSecondaryTexts[] = { kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, "(?)" };
+const char* kFrameGenDesc = "게임 프레임 사이에 움직임을 맞춘 중간 프레임을 넣어 부드럽게 해요. 화면이 한 프레임 늦어져요.";
+const char* kFgStatusFormat = "진짜 %.0f fps · 계산 %.1f + %.1f ms";
+const char* kFgNoRoomFormat = "게임이 %.0f fps라 넣을 자리가 없어요";
+const char* kFgRifeFormat = "진짜 %.0f fps · 신경망 %.0f ms · 합성 %.1f ms";
+const char* kRifeLoading = "RIFE 준비 중이에요. 그동안은 블록 매칭을 써요.";
+const char* kRifeFailed = "RIFE를 쓸 수 없어 블록 매칭을 써요. 실행 파일 옆 rife 폴더를 확인하세요.";
+const char* kRifeMissing = "실행 파일 옆에 rife 폴더가 없어 블록 매칭을 써요.";
+const char* kLearnDesc = "진짜 프레임을 가리고 다시 만들어 채점하며 게임마다 값을 맞춰요. 화면은 저장하지 않아요.";
+const char* kLearnFormat = "채점 %d회 · 값 변경 %d회 · 유형 %s";
+const char* kLearnSettingsFormat = "칸 %d · 범위 %d · 벌점 %.4f · 허용 %.2f · 지도 %s";
+const char* kGraphLegend = "분홍: 움직임 보간 · 회색: 단순 블렌딩 (dB, 높을수록 좋음)";
+const char* kNoProfiles = "아직 기록이 없어요. 보간을 켜고 게임을 확대하면 생겨요.";
+const char* kNoHistory = "채점이 20번 쌓이면 그래프가 나와요";
+const char* kSecondaryTexts[] = { kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kFrameGenDesc, kFgStatusFormat, kFgNoRoomFormat,
+                                  kFgRifeFormat, kRifeLoading, kRifeFailed, kRifeMissing,
+                                  kLearnDesc, kLearnFormat, kLearnSettingsFormat, kGraphLegend, kNoProfiles, kNoHistory,
+                                  "일반 리듬게임 스크롤 켬 끔", "(?)" };
+const char* kGenreLabels[GENRE_COUNT] = { "일반", "리듬게임", "스크롤" };
 
 const char* kHotkeys[][2] = {
     { "Alt+Shift+S", "확대 시작/중지" },
@@ -127,6 +146,7 @@ const char* kHotkeys[][2] = {
     { "Alt+Shift+C", "비교 모드" },
     { "Alt+Shift+O", "상태 표시 항상 켜기" },
     { "Alt+Shift+P", "커서 속도 보정" },
+    { "Alt+Shift+F", "프레임 보간" },
     { "Alt+Shift+Q", "종료" },
 };
 
@@ -558,6 +578,119 @@ void RowLabel(const char* label)
     ImGui::SetNextItemWidth(-FLT_MIN);
 }
 
+// RowLabel 다음에 부른다: 오른쪽에 (?)가 들어갈 자리를 남기고 입력 위젯 너비를 정한다.
+void LeaveRoomForHelp()
+{
+    ImGui::PushFont(g_fontThin);
+    float help = ImGui::CalcTextSize("(?)").x;
+    ImGui::PopFont();
+    ImGui::SetNextItemWidth(-(help + ImGui::GetStyle().ItemSpacing.x));
+}
+
+// ---------------------------------------------------------------------------
+// 게임별 학습 기록
+// ---------------------------------------------------------------------------
+
+std::vector<std::wstring> g_profileNames;
+std::wstring g_profileSelected;
+GameProfile g_profileView;
+bool g_profileViewValid = false;
+
+void RefreshProfiles()
+{
+    g_profileNames = ListProfiles(ProfilesDirectory());
+    if (std::find(g_profileNames.begin(), g_profileNames.end(), g_profileSelected) == g_profileNames.end()) {
+        g_profileSelected = g_profileNames.empty() ? L"" : g_profileNames.front();
+        g_profileViewValid = false;
+    }
+    if (!g_profileViewValid && !g_profileSelected.empty()) {
+        g_profileView = GameProfile();
+        g_profileView.name = g_profileSelected;
+        g_profileViewValid = g_profileView.Load(ProfilePath(ProfilesDirectory(), g_profileSelected));
+    }
+}
+
+// 점수 변화 그래프: 각진 테두리 안에 픽셀 굵기의 선으로 그린다.
+void DrawScoreGraph(const std::vector<float>& motion, const std::vector<float>& blend)
+{
+    const float u = (float)P;
+    ImVec2 size(ImGui::GetContentRegionAvail().x, 48 * u);
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    ImVec2 p1(p0.x + size.x, p0.y + size.y);
+    ImGui::Dummy(size);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p0, p1, Col(kWhite));
+    dl->AddRect(p0, p1, Col(g_pal->border), 0, 0, u);
+    if (motion.size() < 2) return;
+
+    float lo = 1e9f, hi = -1e9f;
+    for (float v : motion) { lo = std::min(lo, v); hi = std::max(hi, v); }
+    for (float v : blend) { lo = std::min(lo, v); hi = std::max(hi, v); }
+    if (hi - lo < 1.0f) hi = lo + 1.0f;
+
+    auto plot = [&](const std::vector<float>& values, ImU32 color) {
+        for (size_t i = 1; i < values.size(); i++) {
+            auto at = [&](size_t k) {
+                float x = p0.x + 3 * u + (size.x - 6 * u) * k / (values.size() - 1);
+                float y = p1.y - 3 * u - (size.y - 6 * u) * (values[k] - lo) / (hi - lo);
+                return ImVec2(std::floor(x), std::floor(y));
+            };
+            dl->AddLine(at(i - 1), at(i), color, u);
+        }
+    };
+    plot(blend, Col(g_pal->fill));
+    plot(motion, Col(kPinkDeep));
+}
+
+void DrawLearning(const ScalingStatus& status)
+{
+    RefreshProfiles();
+    const GameProfile* active = AppActiveProfile();
+
+    if (g_profileNames.empty() && !(active && active->evalCount > 0)) {
+        Description(kNoProfiles);
+        return;
+    }
+
+    RowLabel("게임");
+    std::string preview = ToUtf8(g_profileSelected);
+    if (ImGui::BeginCombo("##profile", preview.c_str())) {
+        for (auto& name : g_profileNames) {
+            if (ImGui::Selectable(ToUtf8(name).c_str(), name == g_profileSelected)) {
+                g_profileSelected = name;
+                g_profileViewValid = false;
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    // 지금 확대 중인 게임이면 저장 전 기록까지 바로 보여 준다.
+    const bool isActive = status.active && active && active->name == g_profileSelected;
+    const GameProfile* view = isActive ? active : (g_profileViewValid ? &g_profileView : nullptr);
+    if (!view) return;
+
+    char text[128];
+    snprintf(text, sizeof(text), kLearnFormat, view->evalCount, view->adoptedCount, kGenreLabels[view->genre]);
+    Description(text);
+    snprintf(text, sizeof(text), kLearnSettingsFormat, view->params.cellPx, view->params.coarseRadius, view->params.smoothness, view->params.blendTol,
+             view->params.useMap ? "켬" : "끔");
+    Description(text);
+    if (view->history.size() >= 2) {
+        DrawScoreGraph(view->history, view->baseline);
+        Description(kGraphLegend);
+    } else {
+        Description(kNoHistory);
+    }
+
+    ImGui::BeginDisabled(isActive);
+    if (ImGui::Button("이 게임 기록 지우기")) {
+        DeleteFileW(ProfilePath(ProfilesDirectory(), g_profileSelected).c_str());
+        g_profileViewValid = false;
+    }
+    ImGui::EndDisabled();
+}
+
 // ---------------------------------------------------------------------------
 // 화면 구성
 // ---------------------------------------------------------------------------
@@ -664,6 +797,62 @@ void DrawUi()
 
     if (PixelCheckbox("정수배 스케일링", &s.integerScale)) changed = true;
     Description(kIntegerDesc);
+    EndBox();
+
+    // 프레임 생성
+    BeginBox("##framegen", "프레임 생성", kGrayPalette);
+    if (PixelCheckbox("프레임 보간", &s.frameGen)) changed = true;
+    Description(kFrameGenDesc);
+
+    static const char* const kMultiplierNames[] = { "자동 (주사율까지)", "2배", "3배", "4배" };
+    int multiplierIndex = s.fgMultiplier >= 2 ? s.fgMultiplier - 1 : 0;
+    RowLabel("배수");
+    if (ImGui::Combo("##fgmult", &multiplierIndex, kMultiplierNames, IM_ARRAYSIZE(kMultiplierNames))) {
+        s.fgMultiplier = multiplierIndex == 0 ? 0 : multiplierIndex + 1;
+        changed = true;
+    }
+    static const char* const kQualityNames[] = { "빠름", "기본", "고품질" };
+    RowLabel("품질");
+    if (ImGui::Combo("##fgquality", &s.fgQuality, kQualityNames, IM_ARRAYSIZE(kQualityNames))) changed = true;
+    static const char* const kMethodNames[] = { "보간", "외삽 (실험)" };
+    RowLabel("방식");
+    LeaveRoomForHelp();
+    if (ImGui::Combo("##fgmethod", &s.fgMethod, kMethodNames, IM_ARRAYSIZE(kMethodNames))) changed = true;
+    HelpMarker("보간은 화면이 한 프레임 늦어지는 대신 정확해요.\n외삽은 지연을 늘리지 않고 다음 위치를 예측해요. "
+               "일정하게 움직이는 리듬게임 노트용 실험 기능이에요.");
+    static const char* const kGeneratorNames[] = { "블록 매칭", "RIFE (실험)" };
+    RowLabel("생성기");
+    LeaveRoomForHelp();
+    if (ImGui::Combo("##fggenerator", &s.fgGenerator, kGeneratorNames, IM_ARRAYSIZE(kGeneratorNames))) changed = true;
+    HelpMarker("RIFE는 신경망으로 움직임을 찾아요. 더 정확할 수 있지만 GPU를 더 쓰고 화면이 그만큼 더 늦어져요.\n"
+               "실행 파일 옆에 rife 폴더가 있어야 하고, 없으면 블록 매칭을 써요. 외삽에서는 쓰지 않아요.");
+    if (s.fgGenerator == 1) {
+        if (!RifeEngine::FilesExist(RifeEngine::DefaultDirectory())) Description(kRifeMissing);
+        else if (status.fgRifeState == 0) Description(kRifeLoading);
+        else if (status.fgRifeState == 2) Description(kRifeFailed);
+    }
+    static const char* const kPresetNames[] = { "자동", "일반", "리듬게임" };
+    RowLabel("게임 유형");
+    LeaveRoomForHelp();
+    if (ImGui::Combo("##fgpreset", &s.fgPreset, kPresetNames, IM_ARRAYSIZE(kPresetNames))) changed = true;
+    HelpMarker("자동과 리듬게임은 채점에서 더 좋게 나오면 게임별 화면 지도(자주 움직이는 곳과 방향)를 움직임 찾기에 써요.\n"
+               "일반은 쓰지 않아요.");
+    if (PixelCheckbox("움직임 시각화", &s.fgVisualize)) changed = true;
+    HelpMarker("찾아낸 움직임을 색으로 보여 줘요. 방향은 색, 빠르기는 진하기예요.");
+    if (status.fgActive) {
+        char fgText[96];
+        if (status.fgNoRoom) snprintf(fgText, sizeof(fgText), kFgNoRoomFormat, status.fgRealFps);
+        else if (status.fgRifeState == 1) snprintf(fgText, sizeof(fgText), kFgRifeFormat, status.fgRealFps, status.fgRifeMs, status.fgSynthMs);
+        else snprintf(fgText, sizeof(fgText), kFgStatusFormat, status.fgRealFps, status.fgEstimateMs, status.fgSynthMs);
+        Description(fgText);
+    }
+    EndBox();
+
+    // 게임별 학습
+    BeginBox("##learning", "게임별 학습", kGrayPalette);
+    if (PixelCheckbox("게임별 학습 켜기", &s.fgLearn)) changed = true;
+    Description(kLearnDesc);
+    DrawLearning(status);
     EndBox();
 
     // 화면 표시와 마우스

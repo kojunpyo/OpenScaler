@@ -34,11 +34,16 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <future>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "app.h"
+#include "framegen.h"
+#include "framegen_test.h"
+#include "game_profile.h"
 #include "gui.h"
 #include "shaders.h"
 #include "fsr_constants.h"
@@ -58,7 +63,7 @@ using Clock = std::chrono::steady_clock;
 
 const char* const kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2", "FSR 1.0" };
 
-enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_CURSOR_SPEED, HK_QUIT };
+enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_CURSOR_SPEED, HK_FRAMEGEN, HK_QUIT };
 
 // HLSL cbuffer Params와 같은 레이아웃 (16바이트 정렬)
 struct ShaderParams {
@@ -107,6 +112,15 @@ static void LoadSettings()
     g_settings.osdAlways = GetPrivateProfileIntW(kSettingsSection, L"AlwaysShowStatus", g_settings.osdAlways, file) != 0;
     g_settings.adjustCursorSpeed =
         GetPrivateProfileIntW(kSettingsSection, L"AdjustCursorSpeed", g_settings.adjustCursorSpeed, file) != 0;
+
+    g_settings.frameGen = GetPrivateProfileIntW(kSettingsSection, L"FrameGen", g_settings.frameGen, file) != 0;
+    int multiplier = GetPrivateProfileIntW(kSettingsSection, L"FgMultiplier", g_settings.fgMultiplier, file);
+    g_settings.fgMultiplier = multiplier >= 2 && multiplier <= 4 ? multiplier : 0;
+    g_settings.fgQuality = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"FgQuality", g_settings.fgQuality, file), 0, FG_QUALITY_COUNT - 1);
+    g_settings.fgMethod = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"FgMethod", g_settings.fgMethod, file), 0, FG_METHOD_COUNT - 1);
+    g_settings.fgGenerator = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"FgGenerator", g_settings.fgGenerator, file), 0, FG_GENERATOR_COUNT - 1);
+    g_settings.fgPreset = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"FgPreset", g_settings.fgPreset, file), 0, FG_PRESET_COUNT - 1);
+    g_settings.fgLearn = GetPrivateProfileIntW(kSettingsSection, L"FgLearn", g_settings.fgLearn, file) != 0;
 }
 
 static void SaveSettings()
@@ -119,6 +133,13 @@ static void SaveSettings()
     WritePrivateProfileStringW(kSettingsSection, L"IntegerScale", g_settings.integerScale ? L"1" : L"0", file);
     WritePrivateProfileStringW(kSettingsSection, L"AlwaysShowStatus", g_settings.osdAlways ? L"1" : L"0", file);
     WritePrivateProfileStringW(kSettingsSection, L"AdjustCursorSpeed", g_settings.adjustCursorSpeed ? L"1" : L"0", file);
+    WritePrivateProfileStringW(kSettingsSection, L"FrameGen", g_settings.frameGen ? L"1" : L"0", file);
+    WritePrivateProfileStringW(kSettingsSection, L"FgMultiplier", std::to_wstring(g_settings.fgMultiplier).c_str(), file);
+    WritePrivateProfileStringW(kSettingsSection, L"FgQuality", std::to_wstring(g_settings.fgQuality).c_str(), file);
+    WritePrivateProfileStringW(kSettingsSection, L"FgMethod", std::to_wstring(g_settings.fgMethod).c_str(), file);
+    WritePrivateProfileStringW(kSettingsSection, L"FgGenerator", std::to_wstring(g_settings.fgGenerator).c_str(), file);
+    WritePrivateProfileStringW(kSettingsSection, L"FgPreset", std::to_wstring(g_settings.fgPreset).c_str(), file);
+    WritePrivateProfileStringW(kSettingsSection, L"FgLearn", g_settings.fgLearn ? L"1" : L"0", file);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +227,11 @@ static com_ptr<ID2D1DeviceContext> g_d2dCtx;
 static com_ptr<IDWriteFactory> g_dwFactory;
 static Clock::time_point g_osdUntil;  // 이 시각까지 상태를 표시한다
 
+// 프레임 생성: 셰이더 컴파일에 몇 초 걸려 화면이 멈추지 않도록 프로그램을 시작할 때 뒤에서 만들어 둔다.
+static std::unique_ptr<FrameGen> g_frameGen;
+static std::future<std::unique_ptr<FrameGen>> g_frameGenLoading;
+static FILE* g_fgLog = nullptr;  // --fg-log: 화면마다 시점을 기록한다 (테스트용)
+
 static bool g_systemCursorHidden = false;
 
 // 커서 모양 하나를 텍스처로 변환한 것
@@ -263,6 +289,12 @@ struct ScalingSession {
     double captureFps = 0;
     double outputFps = 0;
     Clock::time_point statTime;
+
+    // 프레임 생성
+    GameProfile profile;
+    double refreshHz = 60;
+    bool fgWasOn = false;
+    Clock::time_point profileSaveTime;
 };
 static ScalingSession* g_scaling = nullptr;
 
@@ -604,6 +636,12 @@ static void StopScaling()
     }
     ShowSystemCursor(true);
     RestoreMouseSpeed();
+    if (g_frameGen) {
+        g_frameGen->SetProfile(nullptr);
+        g_frameGen->Reset();
+    }
+    if (g_scaling->profile.evalCount > 0 || g_scaling->profile.mapSamples > 0)
+        g_scaling->profile.Save(ProfilesDirectory());
     if (g_scaling->session) g_scaling->session.Close();
     if (g_scaling->framePool) g_scaling->framePool.Close();
     g_d2dCtx->SetTarget(nullptr);
@@ -614,6 +652,28 @@ static void StopScaling()
     delete g_scaling;
     g_scaling = nullptr;
     printf("\n[중지] 스케일링을 종료했습니다.\n");
+}
+
+// 게임 이름: 창을 만든 프로세스의 실행 파일 이름 (확장자 제외)
+static std::wstring GameNameOf(HWND hwnd)
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    std::wstring name = L"unknown";
+    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (proc) {
+        wchar_t path[MAX_PATH];
+        DWORD len = MAX_PATH;
+        if (QueryFullProcessImageNameW(proc, 0, path, &len)) {
+            name.assign(path, len);
+            size_t slash = name.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) name = name.substr(slash + 1);
+            size_t dot = name.find_last_of(L'.');
+            if (dot != std::wstring::npos) name = name.substr(0, dot);
+        }
+        CloseHandle(proc);
+    }
+    return name;
 }
 
 static void StartScaling(HWND target)
@@ -630,9 +690,19 @@ static void StartScaling(HWND target)
     auto s = new ScalingSession();
     s->target = target;
 
+    // 게임별 프로필: 실행 파일 이름으로 구분한다.
+    s->profile.name = GameNameOf(target);
+    s->profile.Load(ProfilePath(ProfilesDirectory(), s->profile.name));
+    s->profileSaveTime = Clock::now();
+
     // 대상 창이 있는 모니터 전체를 덮는다.
-    MONITORINFO mi = { sizeof(mi) };
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
     GetMonitorInfoW(MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST), &mi);
+    DEVMODEW mode = {};
+    mode.dmSize = sizeof(mode);
+    if (EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+        s->refreshHz = mode.dmDisplayFrequency;
     s->monitor = mi.rcMonitor;
     s->outW = mi.rcMonitor.right - mi.rcMonitor.left;
     s->outH = mi.rcMonitor.bottom - mi.rcMonitor.top;
@@ -858,18 +928,31 @@ static void DrawOsd(ScalingSession* s)
     g_d2dCtx->BeginDraw();
 
     if (showStatus) {
-        wchar_t text[256];
+        wchar_t text[384];
         swprintf_s(text, L"%hs  ·  샤픈 %.1f  ·  정수배 %ls  ·  커서 속도 보정 %ls\n%u×%u → %u×%u  ·  출력 %.0f fps  ·  캡처 %.0f fps",
                    kModeNames[g_settings.mode], g_settings.sharpness, g_settings.integerScale ? L"ON" : L"OFF",
                    g_settings.adjustCursorSpeed ? L"ON" : L"OFF",
                    s->srcW, s->srcH, s->midW, s->midH, s->outputFps, s->captureFps);
+        if (g_settings.frameGen && g_frameGen) {
+            const FgStats& fg = g_frameGen->Stats();
+            wchar_t line[128];
+            if (fg.noRoom)
+                swprintf_s(line, L"\n보간 ON  ·  게임이 %.0f fps라 넣을 자리가 없음", fg.realFps);
+            else if (fg.rifeState == RifeEngine::STATE_READY)
+                swprintf_s(line, L"\n보간 ON (RIFE %dp)  ·  진짜 %.0f fps  ·  신경망 %.0f ms  ·  합성 %.1f ms", fg.rifeHeight, fg.realFps, fg.rifeMs, fg.synthMs);
+            else
+                swprintf_s(line, L"\n보간 ON%ls  ·  진짜 %.0f fps  ·  계산 %.1f + %.1f ms",
+                           fg.rifeState == RifeEngine::STATE_LOADING ? L" (RIFE 준비 중)" : fg.rifeState == RifeEngine::STATE_FAILED ? L" (RIFE 실패)" : L"",
+                           fg.realFps, fg.estimateMs, fg.synthMs);
+            wcscat_s(text, line);
+        }
         DrawLabel(s, text, left + margin, top + margin, false);
     }
 
     if (g_settings.compare) {
         wchar_t text[64];
-        swprintf_s(text, L"OpenScaler: %hs", kModeNames[g_settings.mode]);
-        DrawLabel(s, L"일반 확대 (Bilinear)", left + margin, bottom - margin, true);
+        swprintf_s(text, L"OpenScaler: %hs%ls", kModeNames[g_settings.mode], g_settings.frameGen ? L" + 보간" : L"");
+        DrawLabel(s, g_settings.frameGen ? L"일반 확대 (Bilinear), 보간 끔" : L"일반 확대 (Bilinear)", left + margin, bottom - margin, true);
         DrawLabel(s, text, (left + right) / 2 + margin, bottom - margin, true);
     }
 
@@ -877,9 +960,33 @@ static void DrawOsd(ScalingSession* s)
     g_d2dCtx->SetTarget(nullptr);
 }
 
+static double NowSeconds()
+{
+    LARGE_INTEGER counter, frequency;
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    return double(counter.QuadPart) / double(frequency.QuadPart);
+}
+
+static FgOptions CurrentFgOptions(const ScalingSession* s)
+{
+    FgOptions o;
+    o.multiplier = g_settings.fgMultiplier;
+    o.quality = g_settings.fgQuality;
+    o.method = g_settings.fgMethod;
+    o.generator = g_settings.fgGenerator;
+    o.visualize = g_settings.fgVisualize;
+    o.learn = g_settings.fgLearn;
+    o.useMap = g_settings.fgPreset != FG_PRESET_GENERAL;
+    o.refreshHz = s->refreshHz;
+    return o;
+}
+
 static void RenderFrame()
 {
     auto s = g_scaling;
+    bool newFrame = false;
+    double frameTime = 0;
 
     // 1. 가장 최신 캡처 프레임만 사용한다.
     wgc::Direct3D11CaptureFrame frame{ nullptr };
@@ -905,6 +1012,8 @@ static void RenderFrame()
         if (GetVisibleClient(s, contentSize.Width, contentSize.Height, box, visible)) {
             EnsureTexture(s->srcTex, s->srcSrv, nullptr, s->srcW, s->srcH, box.right - box.left, box.bottom - box.top);
             g_ctx->CopySubresourceRegion(s->srcTex.get(), 0, 0, 0, 0, frameTex.get(), 0, &box);
+            newFrame = true;
+            frameTime = frame.SystemRelativeTime().count() / 1e7;  // QPC 기준 캡처 시각 (100ns 단위)
         }
     }
 
@@ -935,6 +1044,36 @@ static void RenderFrame()
 
         EnsureTexture(s->midTex, s->midSrv, &s->midRtv, s->midW, s->midH, dstW, dstH);
 
+        // 프레임 생성: 켜져 있으면 업스케일에 들어갈 영상을 합성 결과로 바꾼다.
+        ID3D11ShaderResourceView* displaySrv = s->srcSrv.get();
+        ID3D11ShaderResourceView* compareSrv = displaySrv;
+        if (!g_frameGen && g_frameGenLoading.valid() &&
+            g_frameGenLoading.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            g_frameGen = g_frameGenLoading.get();
+        if (g_settings.frameGen && g_frameGen) {
+            if (!s->fgWasOn) {
+                g_frameGen->Reset();
+                g_frameGen->SetProfile(&s->profile);
+                s->fgWasOn = true;
+                newFrame = true;  // 켜자마자 지금 영상부터 쌓는다
+                frameTime = NowSeconds();
+            }
+            FgOptions options = CurrentFgOptions(s);
+            if (newFrame) g_frameGen->PushFrame(s->srcTex.get(), s->srcW, s->srcH, frameTime, options);
+            double now = NowSeconds();
+            if (auto generated = g_frameGen->Render(now, options)) {
+                displaySrv = generated;
+                if (auto held = g_frameGen->HeldFrame()) compareSrv = held;
+            }
+            if (g_fgLog) fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f\n", now, g_frameGen->Stats().displayT, g_frameGen->Stats().realFrames,
+                                 g_frameGen->Stats().duplicates, g_frameGen->Stats().rifeShown, g_frameGen->Stats().rifeMissed, g_frameGen->Stats().rifeMs,
+                                 g_frameGen->Stats().contentTime);
+        } else if (s->fgWasOn && !g_settings.frameGen) {
+            g_frameGen->SetProfile(nullptr);
+            g_frameGen->Reset();
+            s->fgWasOn = false;
+        }
+
         g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         g_ctx->IASetInputLayout(nullptr);
         g_ctx->VSSetShader(g_vs.get(), nullptr, 0);
@@ -959,7 +1098,7 @@ static void RenderFrame()
 
         // Pass 1: 업스케일 (FSR 모드는 EASU)
         D3D11_VIEWPORT vp1 = { 0, 0, (float)dstW, (float)dstH, 0, 1 };
-        DrawPass(s->midRtv.get(), vp1, fsr ? g_psEasu.get() : g_psScale.get(), s->srcSrv.get(), s->srcW, s->srcH);
+        DrawPass(s->midRtv.get(), vp1, fsr ? g_psEasu.get() : g_psScale.get(), displaySrv, s->srcW, s->srcH);
 
         // Pass 2: 샤프닝하면서 백버퍼 중앙에 출력 (FSR 모드는 RCAS, 샤프닝 0이면 그대로 복사)
         D3D11_VIEWPORT vp2 = { offX, offY, (float)dstW, (float)dstH, 0, 1 };
@@ -974,7 +1113,7 @@ static void RenderFrame()
             D3D11_RECT left = { (LONG)offX, (LONG)offY, half, (LONG)offY + (LONG)dstH };
             g_ctx->RSSetState(g_rsScissor.get());
             g_ctx->RSSetScissorRects(1, &left);
-            DrawPass(s->backBufferRtv.get(), vp2, g_psScale.get(), s->srcSrv.get(), s->srcW, s->srcH, 0.0f, MODE_BILINEAR);
+            DrawPass(s->backBufferRtv.get(), vp2, g_psScale.get(), compareSrv, s->srcW, s->srcH, 0.0f, MODE_BILINEAR);
             g_ctx->RSSetState(nullptr);
 
             D3D11_VIEWPORT line = { (float)(half - 1), offY, 2, (float)dstH, 0, 1 };
@@ -1019,6 +1158,13 @@ static void PrintStatus()
     g_scaling->capturedFrames = 0;
     g_scaling->presentedFrames = 0;
     g_scaling->statTime = now;
+
+    // 비정상 종료에 대비해 학습 결과를 가끔 저장한다.
+    if (now - g_scaling->profileSaveTime > std::chrono::seconds(60)) {
+        g_scaling->profileSaveTime = now;
+        if (g_scaling->profile.evalCount > 0 || g_scaling->profile.mapSamples > 0)
+            g_scaling->profile.Save(ProfilesDirectory());
+    }
 }
 
 static bool HandleHotkey(int id)
@@ -1047,6 +1193,9 @@ static bool HandleHotkey(int id)
         break;
     case HK_CURSOR_SPEED:
         g_settings.adjustCursorSpeed = !g_settings.adjustCursorSpeed;
+        break;
+    case HK_FRAMEGEN:
+        g_settings.frameGen = !g_settings.frameGen;
         break;
     case HK_SHARP_UP:
         g_settings.sharpness = std::min(1.0f, g_settings.sharpness + 0.1f);
@@ -1089,8 +1238,20 @@ ScalingStatus AppGetStatus()
     st.dstH = g_scaling->midH;
     st.outputFps = g_scaling->outputFps;
     st.captureFps = g_scaling->captureFps;
+    if (g_settings.frameGen && g_frameGen) {
+        const FgStats& fg = g_frameGen->Stats();
+        st.fgActive = true;
+        st.fgNoRoom = fg.noRoom;
+        st.fgRealFps = fg.realFps;
+        st.fgEstimateMs = fg.estimateMs;
+        st.fgSynthMs = fg.synthMs;
+        st.fgRifeState = fg.rifeState;
+        st.fgRifeMs = fg.rifeMs;
+    }
     return st;
 }
+
+const GameProfile* AppActiveProfile() { return g_scaling ? &g_scaling->profile : nullptr; }
 
 static void RegisterHotkeys()
 {
@@ -1100,6 +1261,7 @@ static void RegisterHotkeys()
         { HK_INTEGER, 'I', "Alt+Shift+I" },       { HK_SHARP_UP, VK_UP, "Alt+Shift+Up" },
         { HK_SHARP_DOWN, VK_DOWN, "Alt+Shift+Down" }, { HK_COMPARE, 'C', "Alt+Shift+C" },
         { HK_OSD, 'O', "Alt+Shift+O" },           { HK_CURSOR_SPEED, 'P', "Alt+Shift+P" },
+        { HK_FRAMEGEN, 'F', "Alt+Shift+F" },
         { HK_QUIT, 'Q', "Alt+Shift+Q" },
     };
     for (auto& k : keys) {
@@ -1141,6 +1303,7 @@ static void PrintHelp()
            "  Alt+Shift+C     비교 모드 (왼쪽: 일반 확대, 오른쪽: 현재 모드)\n"
            "  Alt+Shift+O     화면 위 상태 표시 항상 켜기/끄기\n"
            "  Alt+Shift+P     커서 속도 보정 켜기/끄기 (확대 중 마우스 속도를 배율만큼 낮춤)\n"
+           "  Alt+Shift+F     프레임 보간 켜기/끄기\n"
            "  Alt+Shift+Up    샤프닝 강하게\n"
            "  Alt+Shift+Down  샤프닝 약하게\n"
            "  Alt+Shift+Q     프로그램 종료\n"
@@ -1166,6 +1329,7 @@ int wmain(int argc, wchar_t** argv)
     // 명령줄 옵션: --target "창 제목 일부" --duration 초 --mode 0~4 --sharp 0~1 --integer
     //             --no-gui (설정 창 없이 실행) --console (로그를 보여 줄 콘솔 창 열기)
     std::wstring targetTitle;
+    std::wstring fgSelfTestDir;
     double duration = 0;
     bool useGui = true;
     for (int i = 1; i < argc; i++) {
@@ -1186,6 +1350,14 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--integer") g_settings.integerScale = true;
         else if (a == L"--compare") g_settings.compare = true;
         else if (a == L"--cursor-speed") g_settings.adjustCursorSpeed = true;
+        else if (a == L"--fg-selftest" && i + 1 < argc) fgSelfTestDir = argv[++i];
+        else if (a == L"--fg") g_settings.frameGen = true;
+        else if (a == L"--fg-mult" && i + 1 < argc) g_settings.fgMultiplier = _wtoi(argv[++i]);
+        else if (a == L"--fg-quality" && i + 1 < argc) g_settings.fgQuality = std::clamp(_wtoi(argv[++i]), 0, FG_QUALITY_COUNT - 1);
+        else if (a == L"--fg-extrapolate") g_settings.fgMethod = FG_METHOD_EXTRAPOLATE;
+        else if (a == L"--fg-rife") g_settings.fgGenerator = FG_GENERATOR_RIFE;
+        else if (a == L"--fg-visualize") g_settings.fgVisualize = true;
+        else if (a == L"--fg-log" && i + 1 < argc) _wfopen_s(&g_fgLog, argv[++i], L"w");
     }
 
     // 시스템 커서를 숨기는 데 Magnification API를 사용한다.
@@ -1204,7 +1376,15 @@ int wmain(int argc, wchar_t** argv)
         printf("설정 파일: %s\n현재 설정: %s, 샤픈 %.1f, 정수배 %s\n\n", winrt::to_string(g_settingsPath).c_str(),
                kModeNames[g_settings.mode], g_settings.sharpness, g_settings.integerScale ? "ON" : "OFF");
         InitD3D();
+        if (!fgSelfTestDir.empty()) {
+            exitCode = RunFrameGenSelfTest(g_device.get(), g_ctx.get(), fgSelfTestDir);
+            MagUninitialize();
+            return exitCode;
+        }
         RegisterHotkeys();
+        g_frameGenLoading = std::async(std::launch::async, [] {
+            return std::make_unique<FrameGen>(g_device.get(), g_ctx.get());
+        });
         if (useGui && !GuiCreate(g_device.get(), g_ctx.get())) {
             printf("설정 창을 만들지 못했습니다. 단축키로만 사용할 수 있습니다.\n");
             useGui = false;
@@ -1253,6 +1433,8 @@ int wmain(int argc, wchar_t** argv)
         }
 
         StopScaling();
+        if (g_frameGenLoading.valid()) g_frameGenLoading.wait();
+        g_frameGen.reset();  // 신경망 스레드를 D3D 정리 전에 끝낸다
         GuiDestroy();
     } catch (const winrt::hresult_error& e) {
         std::string text = "오류가 발생했습니다.\n\n" + winrt::to_string(e.message());
@@ -1264,5 +1446,6 @@ int wmain(int argc, wchar_t** argv)
     ShowSystemCursor(true);
     RestoreMouseSpeed();
     MagUninitialize();
+    if (g_fgLog) fclose(g_fgLog);
     return exitCode;
 }

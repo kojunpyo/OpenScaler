@@ -59,7 +59,8 @@ OpenScaler는 같은 원리를 오픈소스로 구현하고, 각 단계(화면 �
 | 설정 창 (GUI) | 대상 창 선택, 시작/중지, 실시간 상태, 모든 옵션을 한 화면에서 설정 | ✅ 완료 |
 | 설정 저장 | 단축키로 바꾼 설정을 `OpenScaler.ini`에 저장하고 다음 실행 때 불러오기 | ✅ 완료 |
 | 화면 위 상태 표시 | 설정을 바꾸면 모드, 샤프닝, 해상도, FPS를 화면 구석에 잠깐 표시 (항상 켜기 가능) | ✅ 완료 |
-| 프레임 보간 (실험) | 두 프레임 사이에 중간 프레임을 만들어 FPS 향상 | 🔲 도전 과제 |
+| 프레임 보간 (실험) | 움직임을 찾아 진짜 프레임 사이에 중간 프레임을 합성. 블록 매칭 또는 RIFE 신경망 | ✅ 완료 |
+| 게임별 학습 | 진짜 프레임을 가리고 다시 만들어 채점하며 게임마다 값을 조정하고 화면 지도를 쌓음 | ✅ 1, 2단계 완료 |
 
 ---
 
@@ -167,6 +168,7 @@ OpenScaler는 같은 원리를 오픈소스로 구현하고, 각 단계(화면 �
 | Alt+Shift+C | 비교 모드 켜기/끄기 |
 | Alt+Shift+O | 화면 위 상태 표시 항상 켜기/끄기 (끄면 설정을 바꿀 때만 잠깐 표시) |
 | Alt+Shift+P | 커서 속도 보정 켜기/끄기 (기본값: 끔) |
+| Alt+Shift+F | 프레임 보간 켜기/끄기 (기본값: 끔) |
 | Alt+Shift+↑ / ↓ | 샤프닝 강도 조절 (0.0 ~ 1.0) |
 | Alt+Shift+Q | 종료 |
 
@@ -200,9 +202,27 @@ OpenScaler.exe --target "창 제목 일부" --mode 3 --sharp 0.5 --integer --dur
 | `--integer` | 정수배 스케일링 사용 |
 | `--compare` | 비교 모드로 시작 |
 | `--cursor-speed` | 커서 속도 보정 켜기 |
+| `--fg` | 프레임 보간 켜기 |
+| `--fg-mult` | 배수 (2~4, 없으면 주사율까지 자동) |
+| `--fg-quality` | 품질 (0: 빠름, 1: 기본, 2: 고품질) |
+| `--fg-extrapolate` | 보간 대신 외삽 (실험) |
+| `--fg-rife` | 생성기를 RIFE로 (실행 파일 옆에 `rife` 폴더 필요) |
+| `--fg-visualize` | 찾아낸 움직임을 색으로 표시 |
+| `--fg-log` | 화면마다 표시 시점을 파일에 기록 (테스트용) |
+| `--fg-selftest` | 계산으로 만든 영상으로 프레임 생성 품질을 재서 지정한 폴더에 저장하고 종료 |
 | `--no-gui` | 설정 창 없이 실행 (단축키로만 조작) |
 | `--console` | 로그를 보여 주는 콘솔 창 열기 (디버깅용) |
 | `--duration` | 지정한 초가 지나면 자동 종료 |
+
+### RIFE 생성기 (선택)
+
+프레임 보간의 생성기를 RIFE로 쓰려면 실행 파일 옆에 `rife` 폴더가 있어야 합니다. 약 57MB라 저장소와 기본 배포 파일에는 넣지 않았고, 폴더가 없으면 블록 매칭을 씁니다.
+
+| 파일 | 얻는 곳 |
+|---|---|
+| `onnxruntime.dll`, `onnxruntime_providers_shared.dll` | NuGet `Microsoft.ML.OnnxRuntime.DirectML` 1.24.4의 `runtimes/win-x64/native` |
+| `DirectML.dll` | NuGet `Microsoft.AI.DirectML` 1.15.4의 `bin/x64-win` |
+| `rife.onnx` | [RIFE v4.26 모델](https://huggingface.co/hzwer/RIFE)의 `flownet.pkl`을 `python -I tools/rife_export.py flownet.pkl rife.onnx`로 변환 (torch, onnx, onnxscript 필요) |
 
 ### 빌드 방법
 
@@ -240,13 +260,20 @@ OpenScaler/
 │   ├── app.h              # main.cpp와 설정 창이 함께 쓰는 설정과 기능
 │   ├── gui.cpp / gui.h    # 설정 창 (Dear ImGui)
 │   ├── shaders.h          # HLSL 셰이더 (업스케일, 샤프닝, 커서) - 실행 중에 컴파일
+│   ├── framegen.*         # 프레임 생성 (움직임 추정, 합성, 표시 시점, 채점)
+│   ├── framegen_shaders.h # 프레임 생성 컴퓨트 셰이더 - 실행 중에 컴파일
+│   ├── framegen_test.*    # 프레임 생성 자체 테스트 (--fg-selftest)
+│   ├── game_profile.*     # 게임별 프로필 (설정 자동 조정, 화면 지도, 저장)
+│   ├── rife.*             # RIFE 신경망 실행 (ONNX Runtime을 실행 중에 불러옴)
 │   ├── fsr.hlsl           # FSR 1.0 셰이더 진입점 - 빌드할 때 fxc로 컴파일
 │   └── fsr_constants.*    # FSR 상수 계산 (CPU)
 ├── third_party/fsr/       # AMD FidelityFX FSR 1.0 헤더 (MIT, 수정 없음)
 ├── third_party/imgui/     # Dear ImGui 1.91.5 (MIT, 수정 없음)
+├── third_party/onnxruntime/ # ONNX Runtime C API 헤더 (MIT, 수정 없음)
 ├── third_party/galmuri/   # 픽셀 글꼴 Galmuri11 Bold/Condensed (SIL OFL 1.1, 수정 없음) - exe에 리소스로 포함
 ├── assets/                # 로고(logo.png), exe 아이콘(openscaler.ico)
 ├── tools/make_icon.ps1    # 로고와 아이콘 생성 스크립트
+├── tools/rife_export.py   # RIFE 모델을 ONNX로 변환
 ├── docs/                  # 스크린샷 등 문서 자료
 ├── .github/workflows/     # GitHub Actions 자동 빌드, 배포
 ├── CMakeLists.txt         # 빌드 설정
@@ -281,6 +308,8 @@ OpenScaler/
 - 게임 창과 오버레이 사이에 다른 창(예: 이 프로그램의 콘솔)이 겹쳐 있으면 클릭이 그 창으로 갈 수 있습니다.
 - Windows 10에서는 캡처 중인 창에 노란 테두리가 표시될 수 있습니다 (Windows 11에서는 숨김).
 - 화면을 한 번 더 그리는 구조라 약간의 입력 지연이 생깁니다.
+- 프레임 보간은 화면을 진짜 프레임 한 장 간격만큼 늦춥니다 (30fps 게임이면 약 33ms + 계산 시간). 게임 프레임이 모니터 주사율 이상이면 넣을 자리가 없어 그대로 보여 줍니다.
+- 프레임 보간은 게임의 움직임 정보 없이 화면만 보므로 빠른 움직임, 가장자리, 생김새가 같은 물체(리듬게임 노트 등), 밝기만 변하는 장면에서 깨질 수 있습니다. RIFE를 쓰면 지연이 신경망 시간만큼 더 늘어납니다. 측정 결과는 [docs/frame-generation-plan.md](docs/frame-generation-plan.md)에 있습니다.
 
 ---
 
@@ -300,5 +329,8 @@ OpenScaler/
 
 `third_party/fsr`의 FSR 1.0 헤더는 AMD의 저작물이며 MIT 라이선스를 따릅니다 ([third_party/fsr/license.txt](third_party/fsr/license.txt)).
 `third_party/imgui`의 Dear ImGui는 Omar Cornut의 저작물이며 MIT 라이선스를 따릅니다 ([third_party/imgui/LICENSE.txt](third_party/imgui/LICENSE.txt)).
+`third_party/onnxruntime`의 헤더는 Microsoft의 저작물이며 MIT 라이선스를 따릅니다 ([third_party/onnxruntime/LICENSE](third_party/onnxruntime/LICENSE)).
+`tools/rife_export.py`의 신경망 구조는 [Practical-RIFE](https://github.com/hzwer/Practical-RIFE)(MIT, Copyright (c) 2021 hzwer)를 옮긴 것입니다. 학습 모델도 같은 MIT로 공개되어 있습니다.
+`rife` 폴더를 쓸 때의 DirectML.dll은 오픈소스가 아니며 Microsoft의 라이선스를 따릅니다. 폴더 안의 `LICENSE-DirectML.txt`를 함께 두어야 합니다.
 `third_party/galmuri`의 Galmuri11 Bold와 Galmuri11 Condensed는 이민서(quiple)의 저작물이며 SIL Open Font License 1.1을 따릅니다 ([third_party/galmuri/OFL.md](third_party/galmuri/OFL.md)).
 원작자 설명에 따르면 이 두 글꼴의 글리프는 모두 원작자의 창작물이라, 다른 게임 글꼴의 저작권 문제 없이 쓸 수 있습니다.

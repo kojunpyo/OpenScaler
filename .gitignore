@@ -5,3 +5,5 @@ out/
 *.obj
 *.pdb
 OpenScaler.ini
+profiles/
+rife/

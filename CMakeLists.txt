@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(OpenScaler VERSION 0.4.0 LANGUAGES CXX RC)
+project(OpenScaler VERSION 1.0.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,6 +44,15 @@ add_executable(OpenScaler WIN32
     src/gui.cpp
     src/gui.h
     src/shaders.h
+    src/framegen.cpp
+    src/framegen.h
+    src/framegen_shaders.h
+    src/framegen_test.cpp
+    src/framegen_test.h
+    src/game_profile.cpp
+    src/game_profile.h
+    src/rife.cpp
+    src/rife.h
     src/fsr_constants.cpp
     src/fsr_constants.h
     src/resource.h
@@ -52,7 +61,7 @@ add_executable(OpenScaler WIN32
     ${SHADER_OUT}/PSRcas.h)
 
 # 아이콘(assets)과 픽셀 글꼴(Galmuri, SIL OFL 1.1)은 리소스로 실행 파일 안에 넣는다.
-target_include_directories(OpenScaler PRIVATE ${SHADER_OUT} third_party/fsr assets third_party/galmuri)
+target_include_directories(OpenScaler PRIVATE ${SHADER_OUT} third_party/fsr third_party/onnxruntime assets third_party/galmuri)
 set_source_files_properties(src/openscaler.rc PROPERTIES OBJECT_DEPENDS
     "${CMAKE_SOURCE_DIR}/assets/openscaler.ico;${CMAKE_SOURCE_DIR}/third_party/galmuri/Galmuri11-Bold.ttf;${CMAKE_SOURCE_DIR}/third_party/galmuri/Galmuri11-Condensed.ttf")
 target_compile_definitions(OpenScaler PRIVATE UNICODE _UNICODE NOMINMAX OPENSCALER_VERSION="${PROJECT_VERSION}")
