@@ -12,6 +12,8 @@ extern const char* const kModeNames[MODE_COUNT];
 
 enum FgPreset { FG_PRESET_AUTO, FG_PRESET_GENERAL, FG_PRESET_RHYTHM, FG_PRESET_COUNT };
 
+enum SlowMoState { SLOWMO_OFF, SLOWMO_WAITING, SLOWMO_RECORDING, SLOWMO_GENERATING, SLOWMO_PLAYING };
+
 struct Settings {
     int mode = MODE_FSR;
     float sharpness = 0.5f;
@@ -28,6 +30,9 @@ struct Settings {
     int fgPreset = FG_PRESET_AUTO;   // 게임 유형. 자동이면 화면 통계로 판단한다
     bool fgLearn = true;             // 게임별 학습
     bool fgVisualize = false;        // 움직임을 색으로 표시 (발표용, 저장하지 않는다)
+
+    int slowMoTargetFps = 120;       // 슬로모션 테스트에서 가정하는 출력 fps
+    int slowMoSeconds = 1;           // 슬로모션 테스트의 녹화 길이 (초)
 };
 
 struct ScalingStatus {
@@ -46,6 +51,12 @@ struct ScalingStatus {
     double fgSynthMs = 0;        // 합성 (화면을 그릴 때마다)
     int fgRifeState = -1;        // -1: 쓰지 않음, 0: 준비 중, 1: 사용 중, 2: 실패
     double fgRifeMs = 0;         // 신경망 한 번에 걸린 시간
+
+    // 슬로모션 테스트
+    int slowMoState = SLOWMO_OFF;
+    int slowMoDone = 0;          // 만든 프레임 수, 재생 중이면 지금 몇 번째인지
+    int slowMoTotal = 0;
+    double refreshHz = 60;
 };
 
 // 현재 설정. 값을 바꾼 뒤에는 AppSettingsChanged()를 불러 저장하고 화면에 잠깐 표시한다.
@@ -54,6 +65,7 @@ void AppSettingsChanged();
 
 void AppStartScaling(HWND target);
 void AppStopScaling();
+void AppSlowMoToggle(double delaySeconds);  // 슬로모션 테스트 시작(이 시간 뒤 녹화) 또는 끝내기
 ScalingStatus AppGetStatus();
 const GameProfile* AppActiveProfile();  // 지금 확대 중인 게임의 프로필. 없으면 nullptr
 const std::wstring& AppSettingsPath();

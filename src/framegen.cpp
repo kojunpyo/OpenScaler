@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 #include "framegen_shaders.h"
@@ -22,6 +23,7 @@ const float kZeroBias = 0.002f;
 const int kWideSearchLevel = 3;      // 1/8 영상에서 넓게 찾는다
 const int kWideSearchRadius = 16;    // 원본 기준 약 128픽셀
 const double kRifeBudget = 0.7;      // 신경망이 프레임 간격의 이 비율을 넘으면 입력 해상도를 낮춘다
+const double kSlowMoWarmup = 0.25;   // 슬로모션 녹화 직후 드라이버가 자리를 잡는 동안의 프레임은 쓰지 않는다 (초)
 const float kDuplicateMse = 2e-7f;   // 1/8 영상의 한 묶음이 이보다 달라야 새 프레임으로 본다 (8비트 반올림 오차 수준)
 
 float PsnrFromMse(float mse)
@@ -132,12 +134,12 @@ void FrameGen::Reset()
     m_intervals.clear();
     m_interval = 0;
     m_held = nullptr;
-    m_liveFlow = nullptr;
+    m_liveFlow = m_olderFlow = nullptr;
     m_pending.clear();
     m_evalCurrentGroup = -1;
     m_clock = m_lastRender = 0;
     m_rifePrevious.clear();
-    m_rifeValidSeq = -1;
+    for (auto& result : m_rifeResults) result.seq = -1;
     for (auto& set : m_flowSets) set.hasHistory = false;
 }
 
@@ -166,7 +168,6 @@ void FrameGen::EnsureFrames(UINT w, UINT h)
     m_h = h;
     m_flowSets.clear();
     m_flowSets.reserve(8);  // 포인터가 바뀌지 않게 미리 잡아 둔다 (칸 크기는 3가지뿐)
-    m_liveFlow = nullptr;
 
     for (int i = 0; i < kLevels; i++) {
         m_lvlW[i] = std::max(1u, w >> i);
@@ -207,6 +208,7 @@ FrameGen::FlowSet& FrameGen::GetFlowSet(int cellPx)
     for (int i = 0; i < 2; i++) {
         set.raw[i] = MakeTarget(set.gridW, set.gridH, flowFormat, true);
         set.flow[i] = MakeTarget(set.gridW, set.gridH, flowFormat, true);
+        set.older[i] = MakeTarget(set.gridW, set.gridH, flowFormat, false);
     }
     set.splat = MakeTarget(set.gridW, set.gridH, DXGI_FORMAT_R32_UINT, true);
     set.motion = MakeTarget(set.gridW, set.gridH, flowFormat, true);
@@ -617,6 +619,13 @@ void FrameGen::PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, c
         m_stats.realFps = 1.0 / m_interval;
     }
 
+    // 채점과 다음 추정이 flow를 덮어쓰기 전에 지금 쌍의 움직임을 옮겨 둔다. 이 쌍은 이제 한 쌍 앞이 된다.
+    m_olderFlow = nullptr;
+    if (m_tripleValid && m_liveFlow) {
+        for (int i = 0; i < 2; i++) m_ctx->CopyResource(m_liveFlow->older[i].tex.get(), m_liveFlow->flow[i].tex.get());
+        m_olderFlow = m_liveFlow;
+    }
+
     TimerBegin(m_timerEstimate);
     if (m_pairValid) {
         UpdateMapTexture();
@@ -724,24 +733,34 @@ std::vector<float> FrameGen::RifePrepare(const Frame& f)
 
 void FrameGen::RifeUpload(const RifeEngine::Result& result)
 {
-    if ((UINT)result.w != m_rifeResultW || (UINT)result.h != m_rifeResultH) {
-        m_rifeResultW = result.w;
-        m_rifeResultH = result.h;
-        m_rifeFlow = MakeTarget(result.w, result.h, DXGI_FORMAT_R32G32B32A32_FLOAT, false);
-        m_rifeMask = MakeTarget(result.w, result.h, DXGI_FORMAT_R32_FLOAT, false);
+    std::swap(m_rifeResults[0], m_rifeResults[1]);
+    RifeFlow& slot = m_rifeResults[0];
+    if ((UINT)result.w != slot.w || (UINT)result.h != slot.h) {
+        slot.w = result.w;
+        slot.h = result.h;
+        slot.flow = MakeTarget(result.w, result.h, DXGI_FORMAT_R32G32B32A32_FLOAT, false);
+        slot.mask = MakeTarget(result.w, result.h, DXGI_FORMAT_R32_FLOAT, false);
     }
-    m_ctx->UpdateSubresource(m_rifeFlow.tex.get(), 0, nullptr, result.flow.data(), result.w * 4 * sizeof(float), 0);
-    m_ctx->UpdateSubresource(m_rifeMask.tex.get(), 0, nullptr, result.mask.data(), result.w * sizeof(float), 0);
+    slot.seq = result.seq;
+    m_ctx->UpdateSubresource(slot.flow.tex.get(), 0, nullptr, result.flow.data(), result.w * 4 * sizeof(float), 0);
+    m_ctx->UpdateSubresource(slot.mask.tex.get(), 0, nullptr, result.mask.data(), result.w * sizeof(float), 0);
 }
 
-void FrameGen::RifeCompose(const Frame& a, const Frame& b, float t, ID3D11UnorderedAccessView* out)
+void FrameGen::RifeCompose(const Frame& a, const Frame& b, const RifeFlow& rife, float t, ID3D11UnorderedAccessView* out)
 {
     Cb cb = BaseCb(nullptr);
     cb.t = t;
-    cb.lvlSize[0] = (int)m_rifeResultW;
-    cb.lvlSize[1] = (int)m_rifeResultH;
-    Run(m_csRifeCompose.get(), { a.colorSrv.get(), b.colorSrv.get(), m_rifeFlow.srv.get(), m_rifeMask.srv.get() }, out, cb,
+    cb.lvlSize[0] = (int)rife.w;
+    cb.lvlSize[1] = (int)rife.h;
+    Run(m_csRifeCompose.get(), { a.colorSrv.get(), b.colorSrv.get(), rife.flow.srv.get(), rife.mask.srv.get() }, out, cb,
         (m_w + 7) / 8, (m_h + 7) / 8);
+}
+
+const FrameGen::RifeFlow* FrameGen::FindRife(long long seq) const
+{
+    for (const RifeFlow& result : m_rifeResults)
+        if (result.seq == seq) return &result;
+    return nullptr;
 }
 
 ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
@@ -755,10 +774,7 @@ ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
         RifeEngine::Result result;
         if (m_rife->TakeResult(result)) {
             // 보관 중인 프레임 쌍의 결과만 쓴다. 더 늦은 결과는 이미 지나갔다.
-            if (result.seq >= m_stats.realFrames - 1) {
-                RifeUpload(result);
-                m_rifeValidSeq = result.seq;
-            }
+            if (result.seq >= m_stats.realFrames - 1) RifeUpload(result);
         }
         m_stats.rifeState = m_rife->GetState();
         m_stats.rifeMs = m_rife->AverageMs();
@@ -800,16 +816,17 @@ ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
     if (std::abs(error) > m_interval) m_clock = target;
     else m_clock += error * 0.1;
 
-    // RIFE: 표시 시계는 결과가 이미 나온 프레임 쌍을 지나고 있다. 새 결과가 나올 때까지 앞 쌍을 계속 보여 준다.
-    const Frame* showA = &a;
-    const Frame* showB = &b;
-    const bool usePrevious = rifeReady && m_rifeValidSeq == m_stats.realFrames - 1 && m_count >= 3;
-    if (usePrevious) {
-        showA = &m_frames[2];
-        showB = &m_frames[1];
-        m_held = showA->colorSrv.get();
-    }
-    const bool useRife = rifeReady && (usePrevious || m_rifeValidSeq == m_stats.realFrames);
+    // 게임 프레임 간격이 고르지 않으면 짧은 간격의 쌍이 도착했을 때 표시 시계가 아직 앞 쌍에 있다.
+    // 이때 지금 쌍만 쓰면 시점이 0에 묶여 멈췄다가 건너뛰므로, 시계가 있는 쌍을 찾아 보여 준다.
+    // RIFE는 표시 시계가 결과가 이미 나온 쌍을 지나고 있으면 새 결과가 나올 때까지 앞 쌍을 계속 보여 준다.
+    const RifeFlow* rifeNew = rifeReady ? FindRife(m_stats.realFrames) : nullptr;
+    const RifeFlow* rifeOld = rifeReady && m_tripleValid ? FindRife(m_stats.realFrames - 1) : nullptr;
+    const bool olderUsable = !extrapolate && m_tripleValid && m_count >= 3 && (m_olderFlow || rifeOld);
+    const bool usePrevious = olderUsable && (m_clock < a.time || (rifeOld && !rifeNew));
+    const Frame* showA = usePrevious ? &m_frames[2] : &a;
+    const Frame* showB = usePrevious ? &m_frames[1] : &b;
+    const RifeFlow* rife = usePrevious ? rifeOld : rifeNew;
+    m_held = showA->colorSrv.get();
 
     float t = (float)((m_clock - showA->time) / (showB->time - showA->time));
     if (extrapolate) t = std::clamp(t, 1.0f, kMaxExtrapolate);
@@ -830,14 +847,20 @@ ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
     if (t >= 0.995f && t <= 1.005f) return showB->colorSrv.get();
 
     TimerBegin(m_timerSynth);
-    if (useRife) {
-        RifeCompose(*showA, *showB, t, m_output.uav.get());
+    if (rife) {
+        RifeCompose(*showA, *showB, *rife, t, m_output.uav.get());
         m_stats.rifeShown++;
     } else {
         // RIFE 결과가 없으면 블록 매칭으로 대신한다.
         if (wantRife) m_stats.rifeMissed++;
         const FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
-        Synthesize(a, b, *m_liveFlow, t, params, m_output.uav.get());
+        if (usePrevious) {
+            FlowSet olderSet = *m_olderFlow;
+            olderSet.flow = olderSet.older;
+            Synthesize(*showA, *showB, olderSet, t, params, m_output.uav.get());
+        } else {
+            Synthesize(a, b, *m_liveFlow, t, params, m_output.uav.get());
+        }
     }
     TimerEnd(m_timerSynth);
     m_stats.synthMs = m_timerSynth.ms;
@@ -847,6 +870,185 @@ ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
 ID3D11ShaderResourceView* FrameGen::HeldFrame() const
 {
     return m_held;
+}
+
+// ---------------------------------------------------------------------------
+// 슬로모션 테스트
+// 실시간 제약 없이 표시 프레임을 전부 만들어 두므로, 느린 GPU에서도 목표 fps의 화면을 빠짐없이 볼 수 있다.
+// 움직임 추정과 합성은 실시간 경로와 같은 셰이더를 쓴다. 표시 지연과 프레임 고르기는 이 방법으로 확인할 수 없다.
+// ---------------------------------------------------------------------------
+
+void FrameGen::SlowMoBegin(ID3D11Texture2D* source, UINT w, UINT h, int capacity)
+{
+    SlowMoClear();
+    Reset();
+    EnsureFrames(w, h);
+    m_slowMoReal.reserve(capacity);
+    for (int i = 0; i < capacity; i++) {
+        m_slowMoReal.push_back(MakeTarget(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, false));
+        m_ctx->CopyResource(m_slowMoReal.back().tex.get(), source);
+    }
+    m_slowMoTimes.assign(capacity, 0.0);
+
+    // 처음 쓰는 텍스처에 드라이버가 메모리를 잡느라 멈추는 일이 녹화 중에 생기지 않도록 여기서 끝날 때까지 기다린다.
+    auto staging = GetStaging(w, h, DXGI_FORMAT_B8G8R8A8_UNORM);
+    m_ctx->CopyResource(staging.get(), m_slowMoReal.back().tex.get());
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    check_hresult(m_ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped));
+    m_ctx->Unmap(staging.get(), 0);
+    RecycleStaging(staging);
+    m_rifeHeightLimit = 10000;  // 시간 제한이 없으므로 실시간에서 낮춘 입력 높이를 되돌린다
+}
+
+bool FrameGen::SlowMoRecord(ID3D11Texture2D* source, UINT w, UINT h, double time)
+{
+    if (w != m_w || h != m_h) return false;
+    if (SlowMoFull()) return true;
+
+    Frame& incoming = m_frames[kFrames - 1];
+    m_ctx->CopyResource(incoming.color.get(), source);
+    BuildPyramid(incoming);
+    if (m_count > 0 && IsDuplicate(incoming, m_frames[0])) {
+        m_stats.duplicates++;
+        return true;
+    }
+    std::rotate(m_frames.begin(), m_frames.end() - 1, m_frames.end());
+    m_count = std::min(m_count + 1, kFrames - 1);
+
+    if (m_slowMoFirstSeen < 0) m_slowMoFirstSeen = time;
+    if (time - m_slowMoFirstSeen < kSlowMoWarmup) return true;
+
+    m_ctx->CopyResource(m_slowMoReal[m_slowMoRecorded].tex.get(), source);
+    m_slowMoTimes[m_slowMoRecorded] = time;
+    m_slowMoRecorded++;
+    return true;
+}
+
+double FrameGen::SlowMoSpan() const
+{
+    return m_slowMoRecorded >= 2 ? m_slowMoTimes[m_slowMoRecorded - 1] - m_slowMoTimes[0] : 0;
+}
+
+bool FrameGen::SlowMoStartGenerating(int targetFps, int maxFrames)
+{
+    if (m_slowMoRecorded < 2) return false;
+    m_slowMoReal.resize(m_slowMoRecorded);
+    m_slowMoCounts.assign(m_slowMoRecorded - 1, 0);
+
+    // 반올림 오차가 쌓이지 않도록 첫 프레임부터의 시간으로 정한다.
+    int emitted = 0;
+    for (int i = 0; i + 1 < m_slowMoRecorded; i++) {
+        const int end = std::min(maxFrames, (int)std::lround((m_slowMoTimes[i + 1] - m_slowMoTimes[0]) * targetFps));
+        m_slowMoCounts[i] = std::max(0, end - emitted);
+        emitted = std::max(emitted, end);
+    }
+    m_slowMoTotal = emitted;
+    m_slowMoNext = 0;
+    m_slowMoFrames.reserve(emitted);
+    return emitted > 0;
+}
+
+bool FrameGen::SlowMoGenerateStep(const FgOptions& options)
+{
+    if (m_slowMoNext >= (int)m_slowMoCounts.size()) return true;
+
+    bool useRife = options.generator == FG_GENERATOR_RIFE;
+    m_slowMoRifeLoading = false;
+    if (useRife) {
+        EnsureRife(options.quality, false);
+        const RifeEngine::State state = m_rife->GetState();
+        if (state == RifeEngine::STATE_LOADING) {
+            m_slowMoRifeLoading = true;
+            return false;
+        }
+        useRife = state == RifeEngine::STATE_READY;
+    }
+
+    const int index = m_slowMoNext++;
+    const int count = m_slowMoCounts[index];
+    if (count == 0) return m_slowMoNext >= (int)m_slowMoCounts.size();
+
+    const Target& first = m_slowMoReal[index];
+    const Target& second = m_slowMoReal[index + 1];
+    const double gap = m_slowMoTimes[index + 1] - m_slowMoTimes[index];
+
+    SlowMoFrame shown;
+    shown.srv = shown.held = first.srv.get();
+    shown.real = index;
+    m_slowMoFrames.push_back(shown);
+
+    if (count > 1 && gap >= kPauseGap) {
+        // 게임이 멈췄던 구간은 보간하지 않고 진짜 프레임을 그대로 둔다.
+        for (int j = 1; j < count; j++) m_slowMoFrames.push_back(shown);
+    } else if (count > 1) {
+        Frame& a = m_frames[1];
+        Frame& b = m_frames[0];
+        m_ctx->CopyResource(a.color.get(), first.tex.get());
+        m_ctx->CopyResource(b.color.get(), second.tex.get());
+        BuildPyramid(a);
+        BuildPyramid(b);
+
+        if (useRife) {
+            RifeEngine::Result result;
+            useRife = m_rife->RunBlocking(RifePrepare(a), RifePrepare(b), (int)m_rifeW, (int)m_rifeH, result);
+            if (useRife) {
+                RifeUpload(result);
+                m_slowMoRifeHeight = (int)m_rifeH;
+            }
+        }
+        const FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        FlowSet& set = GetFlowSet(params.cellPx);
+        if (!useRife) {
+            UpdateMapTexture();
+            const bool useMap = options.useMap && params.useMap && m_profile && m_profile->mapSamples >= 20;
+            Estimate(a, b, params, set, true, useMap, gap);
+        }
+        for (int j = 1; j < count; j++) {
+            m_slowMoGenerated.push_back(MakeTarget(m_w, m_h, DXGI_FORMAT_R8G8B8A8_UNORM, true));
+            const Target& out = m_slowMoGenerated.back();
+            shown.srv = out.srv.get();
+            shown.t = (float)j / count;
+            shown.generated = true;
+            if (useRife) RifeCompose(a, b, m_rifeResults[0], shown.t, out.uav.get());
+            else Synthesize(a, b, set, shown.t, params, out.uav.get());
+            m_slowMoFrames.push_back(shown);
+        }
+    }
+    return m_slowMoNext >= (int)m_slowMoCounts.size();
+}
+
+std::vector<uint32_t> FrameGen::SlowMoReadFrame(int index)
+{
+    const SlowMoFrame& frame = m_slowMoFrames[index];
+    com_ptr<ID3D11Resource> resource;
+    frame.srv->GetResource(resource.put());
+    auto tex = resource.as<ID3D11Texture2D>();
+    D3D11_TEXTURE2D_DESC td;
+    tex->GetDesc(&td);
+    auto staging = GetStaging(td.Width, td.Height, td.Format);
+    m_ctx->CopyResource(staging.get(), tex.get());
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    check_hresult(m_ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped));
+    std::vector<uint32_t> out((size_t)td.Width * td.Height);
+    for (UINT y = 0; y < td.Height; y++)
+        memcpy(&out[(size_t)y * td.Width], static_cast<const char*>(mapped.pData) + (size_t)y * mapped.RowPitch, td.Width * 4);
+    m_ctx->Unmap(staging.get(), 0);
+    RecycleStaging(staging);
+    if (td.Format == DXGI_FORMAT_B8G8R8A8_UNORM)
+        for (uint32_t& c : out) c = (c & 0xFF00FF00) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF);
+    return out;
+}
+
+void FrameGen::SlowMoClear()
+{
+    m_slowMoFrames.clear();
+    m_slowMoGenerated.clear();
+    m_slowMoReal.clear();
+    m_slowMoTimes.clear();
+    m_slowMoCounts.clear();
+    m_slowMoRecorded = m_slowMoNext = m_slowMoTotal = m_slowMoRifeHeight = 0;
+    m_slowMoFirstSeen = -1;
+    m_slowMoRifeLoading = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -985,7 +1187,7 @@ bool FrameGen::TestRifeRun(int a, int b, int quality)
 FrameGen::RifeTestResult FrameGen::TestRifePsnr(int a, int b, int reference, float t)
 {
     RifeTestResult r;
-    RifeCompose(m_frames[a], m_frames[b], t, m_evalOutput.uav.get());
+    RifeCompose(m_frames[a], m_frames[b], m_rifeResults[0], t, m_evalOutput.uav.get());
     r.psnr = BlockingMsePsnr(m_evalOutput.srv.get(), m_frames[reference].colorSrv.get());
     r.inferMs = m_rifeLastInferMs;
     return r;

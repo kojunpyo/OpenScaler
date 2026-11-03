@@ -132,8 +132,16 @@ const char* kLearnSettingsFormat = "칸 %d · 범위 %d · 벌점 %.4f · 허용
 const char* kGraphLegend = "분홍: 움직임 보간 · 회색: 단순 블렌딩 (dB, 높을수록 좋음)";
 const char* kNoProfiles = "아직 기록이 없어요. 보간을 켜고 게임을 확대하면 생겨요.";
 const char* kNoHistory = "채점이 20번 쌓이면 그래프가 나와요";
+const char* kSlowMoDesc = "짧게 녹화해 프레임을 채운 뒤 느리게 틀어요. 고주사율 모니터 없이도 목표 fps의 모든 장면을 볼 수 있어요. 보간이 꺼져 있어도 돼요.";
+const char* kSlowMoIdle = "확대를 시작하면 쓸 수 있어요";
+const char* kSlowMoPlan = "%d초 녹화 → %d장 → %.1f초 동안 재생";
+const char* kSlowMoWaiting = "곧 녹화해요. 게임 창을 눌러 주세요";
+const char* kSlowMoRecording = "녹화 중이에요";
+const char* kSlowMoGenerating = "프레임 만드는 중 %d / %d";
+const char* kSlowMoPlaying = "재생 중 %d / %d";
 const char* kSecondaryTexts[] = { kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kFrameGenDesc, kFgStatusFormat, kFgNoRoomFormat,
                                   kFgRifeFormat, kRifeLoading, kRifeFailed, kRifeMissing,
+                                  kSlowMoDesc, kSlowMoIdle, kSlowMoPlan, kSlowMoWaiting, kSlowMoRecording, kSlowMoGenerating, kSlowMoPlaying,
                                   kLearnDesc, kLearnFormat, kLearnSettingsFormat, kGraphLegend, kNoProfiles, kNoHistory,
                                   "일반 리듬게임 스크롤 켬 끔", "(?)" };
 const char* kGenreLabels[GENRE_COUNT] = { "일반", "리듬게임", "스크롤" };
@@ -147,6 +155,7 @@ const char* kHotkeys[][2] = {
     { "Alt+Shift+O", "상태 표시 항상 켜기" },
     { "Alt+Shift+P", "커서 속도 보정" },
     { "Alt+Shift+F", "프레임 보간" },
+    { "Alt+Shift+T", "슬로모션 테스트" },
     { "Alt+Shift+Q", "종료" },
 };
 
@@ -287,7 +296,7 @@ void SetupFonts()
     if (ranges.empty()) {
         ImFontGlyphRangesBuilder builder;
         builder.AddRanges(io.Fonts->GetGlyphRangesKorean());
-        builder.AddText("→↑↓…♥·×▼");
+        builder.AddText("→←↑↓…♥·×▼");
         builder.BuildRanges(&ranges);
     }
 
@@ -846,6 +855,46 @@ void DrawUi()
         else snprintf(fgText, sizeof(fgText), kFgStatusFormat, status.fgRealFps, status.fgEstimateMs, status.fgSynthMs);
         Description(fgText);
     }
+    EndBox();
+
+    // 슬로모션 테스트
+    BeginBox("##slowmo", "슬로모션 테스트", kGrayPalette);
+    Description(kSlowMoDesc);
+    static const char* const kSlowMoFpsNames[] = { "120 fps", "180 fps", "240 fps" };
+    int slowMoFpsIndex = std::clamp(s.slowMoTargetFps / 60 - 2, 0, 2);
+    RowLabel("목표 fps");
+    if (ImGui::Combo("##slowmofps", &slowMoFpsIndex, kSlowMoFpsNames, IM_ARRAYSIZE(kSlowMoFpsNames))) {
+        s.slowMoTargetFps = (slowMoFpsIndex + 2) * 60;
+        changed = true;
+    }
+    static const char* const kSlowMoSecondNames[] = { "1초", "2초", "3초" };
+    int slowMoSecondIndex = std::clamp(s.slowMoSeconds - 1, 0, 2);
+    RowLabel("녹화 길이");
+    LeaveRoomForHelp();
+    if (ImGui::Combo("##slowmoseconds", &slowMoSecondIndex, kSlowMoSecondNames, IM_ARRAYSIZE(kSlowMoSecondNames))) {
+        s.slowMoSeconds = slowMoSecondIndex + 1;
+        changed = true;
+    }
+    HelpMarker("생성기와 품질은 위 프레임 생성 설정을 따르고, 방식은 항상 보간이에요.\n"
+               "느린 GPU에서도 모든 장면을 만들 수 있지만, 실제 지연과 끊김은 이 테스트로 확인할 수 없어요.");
+    {
+        char slowMoText[96];
+        const int frames = s.slowMoTargetFps * s.slowMoSeconds;
+        switch (status.slowMoState) {
+        case SLOWMO_WAITING: snprintf(slowMoText, sizeof(slowMoText), "%s", kSlowMoWaiting); break;
+        case SLOWMO_RECORDING: snprintf(slowMoText, sizeof(slowMoText), "%s", kSlowMoRecording); break;
+        case SLOWMO_GENERATING: snprintf(slowMoText, sizeof(slowMoText), kSlowMoGenerating, status.slowMoDone, status.slowMoTotal); break;
+        case SLOWMO_PLAYING: snprintf(slowMoText, sizeof(slowMoText), kSlowMoPlaying, status.slowMoDone, status.slowMoTotal); break;
+        default:
+            if (status.active) snprintf(slowMoText, sizeof(slowMoText), kSlowMoPlan, s.slowMoSeconds, frames, frames / status.refreshHz);
+            else snprintf(slowMoText, sizeof(slowMoText), "%s", kSlowMoIdle);
+        }
+        Description(slowMoText);
+    }
+    ImGui::BeginDisabled(!status.active);
+    if (HeartButton(status.slowMoState == SLOWMO_OFF ? "3초 뒤 녹화" : "슬로모션 끝내기", g_pal->fill, g_pal->hover, g_pal->active))
+        AppSlowMoToggle(3.0);
+    ImGui::EndDisabled();
     EndBox();
 
     // 게임별 학습

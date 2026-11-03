@@ -70,6 +70,31 @@ public:
 
     const FgStats& Stats() const { return m_stats; }
 
+    // 슬로모션 테스트: 짧게 녹화한 진짜 프레임 사이를 미리 채워 두고 한 장씩 보여 준다 ----------
+    struct SlowMoFrame {
+        ID3D11ShaderResourceView* srv = nullptr;   // 보여 줄 영상
+        ID3D11ShaderResourceView* held = nullptr;  // 보간이 없으면 이 시점에 보일 진짜 프레임 (비교 모드 왼쪽)
+        int real = 0;      // 몇 번째 진짜 프레임 뒤인지
+        float t = 0;       // 다음 진짜 프레임까지의 시점
+        bool generated = false;
+    };
+    void SlowMoBegin(ID3D11Texture2D* source, UINT w, UINT h, int capacity);
+    // 진짜 프레임을 넣는다. 크기가 바뀌었으면 false. 내용이 같은 프레임은 버린다.
+    bool SlowMoRecord(ID3D11Texture2D* source, UINT w, UINT h, double time);
+    double SlowMoSpan() const;  // 녹화한 첫 프레임과 마지막 프레임의 시간 차 (초)
+    bool SlowMoFull() const { return m_slowMoRecorded >= (int)m_slowMoReal.size(); }
+    // 목표 fps에 맞춰 프레임 쌍마다 몇 장씩 나눌지 정한다 (최대 maxFrames장). 진짜 프레임이 모자라면 false.
+    bool SlowMoStartGenerating(int targetFps, int maxFrames);
+    // 프레임 쌍 하나를 처리한다. 모두 끝나면 true (화면이 멈추지 않도록 그릴 때마다 조금씩 부른다)
+    bool SlowMoGenerateStep(const FgOptions& options);
+    const std::vector<SlowMoFrame>& SlowMoFrames() const { return m_slowMoFrames; }
+    int SlowMoTotal() const { return m_slowMoTotal; }
+    int SlowMoRealCount() const { return m_slowMoRecorded; }
+    int SlowMoRifeHeight() const { return m_slowMoRifeHeight; }  // RIFE로 만들었으면 입력 높이, 아니면 0
+    bool SlowMoRifeLoading() const { return m_slowMoRifeLoading; }
+    std::vector<uint32_t> SlowMoReadFrame(int index);  // RGBA로 읽어 온다 (테스트용)
+    void SlowMoClear();
+
     // 자체 테스트용: 슬롯에 영상을 넣고 합성 결과를 정답과 비교한다 -----------------
     struct TestResult {
         float psnr = 0;
@@ -121,9 +146,17 @@ private:
         std::array<Target, kLevels> pass;  // 단계별 중간 결과 (마지막 단계는 raw에 쓴다)
         std::array<Target, 2> raw;         // 일치 검사 전 (0: A->B, 1: B->A)
         std::array<Target, 2> flow;        // 일치 검사 후
+        std::array<Target, 2> older;       // 한 쌍 앞 프레임 쌍의 flow
         Target splat;
         Target motion;
         bool hasHistory = false;
+    };
+
+    // 프레임 쌍 하나의 RIFE 결과
+    struct RifeFlow {
+        Target flow, mask;
+        UINT w = 0, h = 0;
+        long long seq = -1;
     };
 
     struct Pending {
@@ -174,7 +207,8 @@ private:
     void EnsureRife(int quality, bool adapt);
     std::vector<float> RifePrepare(const Frame& f);
     void RifeUpload(const RifeEngine::Result& result);
-    void RifeCompose(const Frame& a, const Frame& b, float t, ID3D11UnorderedAccessView* out);
+    void RifeCompose(const Frame& a, const Frame& b, const RifeFlow& rife, float t, ID3D11UnorderedAccessView* out);
+    const RifeFlow* FindRife(long long seq) const;
     FgParams Effective(const FgParams& params, const FgOptions& options) const;
     com_ptr<ID3D11Texture2D> GetStaging(UINT w, UINT h, DXGI_FORMAT format);
     void RecycleStaging(com_ptr<ID3D11Texture2D> tex);
@@ -199,6 +233,7 @@ private:
 
     std::vector<FlowSet> m_flowSets;
     FlowSet* m_liveFlow = nullptr;
+    FlowSet* m_olderFlow = nullptr;  // 한 쌍 앞 프레임 쌍의 움직임이 들어 있는 격자 (없으면 nullptr)
     Target m_output;
     Target m_evalOutput;
     Target m_mse;
@@ -225,12 +260,22 @@ private:
     std::unique_ptr<RifeEngine> m_rife;
     UINT m_rifeW = 0, m_rifeH = 0;
     Target m_rifeInput;
-    Target m_rifeFlow, m_rifeMask;
-    UINT m_rifeResultW = 0, m_rifeResultH = 0;
+    std::array<RifeFlow, 2> m_rifeResults;  // 0이 최신. 표시 시계가 앞 쌍에 있을 때를 위해 두 쌍을 보관한다
     std::vector<float> m_rifePrevious;  // 앞 프레임의 신경망 입력 (다시 줄이지 않도록 보관)
-    long long m_rifeValidSeq = -1;      // m_rifeFlow가 어느 프레임 쌍의 결과인지
     int m_rifeHeightLimit = 10000;      // 너무 느려서 낮춘 입력 높이. 이번 실행 동안 유지한다
     float m_rifeLastInferMs = 0;
+
+    std::vector<Target> m_slowMoReal;       // 녹화한 진짜 프레임 (미리 잡아 둔다)
+    std::vector<double> m_slowMoTimes;
+    std::vector<int> m_slowMoCounts;        // 프레임 쌍마다 나눌 수
+    std::vector<Target> m_slowMoGenerated;  // 만든 프레임의 텍스처
+    std::vector<SlowMoFrame> m_slowMoFrames;
+    int m_slowMoRecorded = 0;
+    double m_slowMoFirstSeen = -1;          // 녹화를 시작하고 처음 받은 프레임의 시각
+    int m_slowMoNext = 0;
+    int m_slowMoTotal = 0;
+    int m_slowMoRifeHeight = 0;
+    bool m_slowMoRifeLoading = false;
 
     GpuTimer m_timerEstimate, m_timerSynth;
     FgStats m_stats;

@@ -63,7 +63,7 @@ using Clock = std::chrono::steady_clock;
 
 const char* const kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2", "FSR 1.0" };
 
-enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_CURSOR_SPEED, HK_FRAMEGEN, HK_QUIT };
+enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_CURSOR_SPEED, HK_FRAMEGEN, HK_SLOWMO, HK_SLOWMO_PAUSE, HK_SLOWMO_PREV, HK_SLOWMO_NEXT, HK_QUIT };
 
 // HLSL cbuffer Params와 같은 레이아웃 (16바이트 정렬)
 struct ShaderParams {
@@ -121,6 +121,8 @@ static void LoadSettings()
     g_settings.fgGenerator = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"FgGenerator", g_settings.fgGenerator, file), 0, FG_GENERATOR_COUNT - 1);
     g_settings.fgPreset = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"FgPreset", g_settings.fgPreset, file), 0, FG_PRESET_COUNT - 1);
     g_settings.fgLearn = GetPrivateProfileIntW(kSettingsSection, L"FgLearn", g_settings.fgLearn, file) != 0;
+    g_settings.slowMoTargetFps = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"SlowMoTargetFps", g_settings.slowMoTargetFps, file), 30, 1000);
+    g_settings.slowMoSeconds = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"SlowMoSeconds", g_settings.slowMoSeconds, file), 1, 3);
 }
 
 static void SaveSettings()
@@ -140,6 +142,8 @@ static void SaveSettings()
     WritePrivateProfileStringW(kSettingsSection, L"FgGenerator", std::to_wstring(g_settings.fgGenerator).c_str(), file);
     WritePrivateProfileStringW(kSettingsSection, L"FgPreset", std::to_wstring(g_settings.fgPreset).c_str(), file);
     WritePrivateProfileStringW(kSettingsSection, L"FgLearn", g_settings.fgLearn ? L"1" : L"0", file);
+    WritePrivateProfileStringW(kSettingsSection, L"SlowMoTargetFps", std::to_wstring(g_settings.slowMoTargetFps).c_str(), file);
+    WritePrivateProfileStringW(kSettingsSection, L"SlowMoSeconds", std::to_wstring(g_settings.slowMoSeconds).c_str(), file);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +235,27 @@ static Clock::time_point g_osdUntil;  // 이 시각까지 상태를 표시한다
 static std::unique_ptr<FrameGen> g_frameGen;
 static std::future<std::unique_ptr<FrameGen>> g_frameGenLoading;
 static FILE* g_fgLog = nullptr;  // --fg-log: 화면마다 시점을 기록한다 (테스트용)
+
+// 슬로모션 테스트: 짧게 녹화해 목표 fps만큼 채운 뒤, 화면 주사율로 한 장씩 보여 준다.
+static struct {
+    SlowMoState state = SLOWMO_OFF;
+    double startAt = 0;     // 녹화를 시작할 시각
+    double recordStart = 0;
+    int index = 0;          // 재생 중인 프레임
+    int vsyncs = 0;         // 지금 프레임을 보여 준 횟수
+    int holdVsyncs = 1;     // 한 프레임을 보여 줄 횟수
+    int loopWait = 0;       // 끝에서 잠깐 멈춘 횟수
+    bool paused = false;
+    bool label = true;
+    UINT w = 0, h = 0;
+    std::wstring message;   // 실패 이유
+    Clock::time_point messageUntil;
+    std::wstring dumpDir;   // --slowmo-dump: 만든 프레임을 파일로 남긴다 (테스트용)
+} g_slowMo;
+static const uint64_t kSlowMoMaxBytes = 4ull << 30;  // 프레임을 담을 메모리 한도
+static const int kSlowMoLoopWait = 30;  // 처음으로 돌아가기 전에 마지막 장을 보여 줄 횟수
+static void SlowMoStop();
+static double NowSeconds();
 
 static bool g_systemCursorHidden = false;
 
@@ -636,6 +661,7 @@ static void StopScaling()
     }
     ShowSystemCursor(true);
     RestoreMouseSpeed();
+    SlowMoStop();
     if (g_frameGen) {
         g_frameGen->SetProfile(nullptr);
         g_frameGen->Reset();
@@ -916,7 +942,10 @@ static void DrawLabel(ScalingSession* s, const wchar_t* text, float x, float y, 
 static void DrawOsd(ScalingSession* s)
 {
     bool showStatus = g_settings.osdAlways || Clock::now() < g_osdUntil;
-    if (!showStatus && !g_settings.compare) return;
+    const bool slowMoMessage = g_slowMo.state == SLOWMO_OFF && Clock::now() < g_slowMo.messageUntil;
+    const bool playing = g_slowMo.state == SLOWMO_PLAYING;
+    const bool showSlowMo = slowMoMessage || (g_slowMo.state != SLOWMO_OFF && (!playing || g_slowMo.label));
+    if (!showStatus && !g_settings.compare && !showSlowMo) return;
 
     float left = (float)(s->dstScreen.left - s->monitor.left);
     float top = (float)(s->dstScreen.top - s->monitor.top);
@@ -949,10 +978,41 @@ static void DrawOsd(ScalingSession* s)
         DrawLabel(s, text, left + margin, top + margin, false);
     }
 
+    if (showSlowMo) {
+        wchar_t text[256];
+        const double now = NowSeconds();
+        if (slowMoMessage) {
+            swprintf_s(text, L"슬로모션 테스트: %ls", g_slowMo.message.c_str());
+        } else if (g_slowMo.state == SLOWMO_WAITING) {
+            if (!g_frameGen) swprintf_s(text, L"슬로모션 테스트: 프레임 생성기 준비 중");
+            else swprintf_s(text, L"슬로모션 테스트: %.0f초 뒤 녹화", std::ceil(std::max(0.0, g_slowMo.startAt - now)));
+        } else if (g_slowMo.state == SLOWMO_RECORDING) {
+            swprintf_s(text, L"● 녹화 중  %.1f / %d초", std::min(now - g_slowMo.recordStart, (double)g_settings.slowMoSeconds), g_settings.slowMoSeconds);
+        } else if (g_slowMo.state == SLOWMO_GENERATING) {
+            if (g_frameGen->SlowMoRifeLoading()) swprintf_s(text, L"슬로모션 테스트: RIFE 준비 중");
+            else swprintf_s(text, L"프레임 만드는 중  %d / %d", (int)g_frameGen->SlowMoFrames().size(), g_frameGen->SlowMoTotal());
+        } else {
+            const auto& frames = g_frameGen->SlowMoFrames();
+            const auto& f = frames[g_slowMo.index];
+            const double slowdown = g_settings.slowMoTargetFps * g_slowMo.holdVsyncs / s->refreshHz;
+            wchar_t kind[64], generator[32];
+            if (f.generated) swprintf_s(kind, L"생성 (진짜 %d + %.2f)", f.real + 1, f.t);
+            else swprintf_s(kind, L"진짜 %d", f.real + 1);
+            if (g_frameGen->SlowMoRifeHeight() > 0) swprintf_s(generator, L"RIFE %dp", g_frameGen->SlowMoRifeHeight());
+            else swprintf_s(generator, L"블록 매칭");
+            swprintf_s(text, L"슬로모션 %.1f배 느리게  ·  %d fps 가정  ·  %d / %d  ·  %ls  ·  %ls%ls\n"
+                             L"Alt+Shift+ Space 멈춤  ·  ←→ 한 장씩  ·  O 글자 끄기  ·  T 끝내기",
+                       slowdown, g_settings.slowMoTargetFps, g_slowMo.index + 1, (int)frames.size(), kind, generator, g_slowMo.paused ? L"  ·  멈춤" : L"");
+        }
+        // 상태 표시가 함께 떠 있으면 그 아래에 놓는다.
+        DrawLabel(s, text, left + margin, top + margin + (showStatus ? s->textFormat->GetFontSize() * 6.0f : 0.0f), false);
+    }
+
     if (g_settings.compare) {
         wchar_t text[64];
-        swprintf_s(text, L"OpenScaler: %hs%ls", kModeNames[g_settings.mode], g_settings.frameGen ? L" + 보간" : L"");
-        DrawLabel(s, g_settings.frameGen ? L"일반 확대 (Bilinear), 보간 끔" : L"일반 확대 (Bilinear)", left + margin, bottom - margin, true);
+        const bool interpolated = g_settings.frameGen || playing;
+        swprintf_s(text, L"OpenScaler: %hs%ls", kModeNames[g_settings.mode], interpolated ? L" + 보간" : L"");
+        DrawLabel(s, interpolated ? L"일반 확대 (Bilinear), 보간 끔" : L"일반 확대 (Bilinear)", left + margin, bottom - margin, true);
         DrawLabel(s, text, (left + right) / 2 + margin, bottom - margin, true);
     }
 
@@ -966,6 +1026,82 @@ static double NowSeconds()
     QueryPerformanceCounter(&counter);
     QueryPerformanceFrequency(&frequency);
     return double(counter.QuadPart) / double(frequency.QuadPart);
+}
+
+static void SlowMoSetPlaybackKeys(bool on)
+{
+    const UINT mods = MOD_ALT | MOD_SHIFT | MOD_NOREPEAT;
+    struct { int id; UINT vk; } keys[] = { { HK_SLOWMO_PAUSE, VK_SPACE }, { HK_SLOWMO_PREV, VK_LEFT }, { HK_SLOWMO_NEXT, VK_RIGHT } };
+    for (auto& k : keys) {
+        if (on) RegisterHotKey(nullptr, k.id, mods, k.vk);
+        else UnregisterHotKey(nullptr, k.id);
+    }
+}
+
+static void SlowMoStop()
+{
+    if (g_slowMo.state == SLOWMO_OFF) return;
+    if (g_slowMo.state == SLOWMO_PLAYING) SlowMoSetPlaybackKeys(false);
+    g_slowMo.state = SLOWMO_OFF;
+    if (g_frameGen) {
+        g_frameGen->SlowMoClear();
+        g_frameGen->SetProfile(nullptr);
+        g_frameGen->Reset();
+    }
+    if (g_scaling) g_scaling->fgWasOn = false;  // 프레임 보간이 켜져 있으면 처음부터 다시 쌓는다
+}
+
+static void SlowMoFail(const wchar_t* message)
+{
+    printf("\n[슬로모션] %s\n", winrt::to_string(message).c_str());
+    SlowMoStop();
+    g_slowMo.message = message;
+    g_slowMo.messageUntil = Clock::now() + std::chrono::seconds(5);
+}
+
+static void SlowMoToggle(double delaySeconds)
+{
+    if (!g_scaling) return;
+    if (g_slowMo.state != SLOWMO_OFF) {
+        SlowMoStop();
+        return;
+    }
+    g_slowMo.state = SLOWMO_WAITING;
+    g_slowMo.startAt = NowSeconds() + delaySeconds;
+    g_slowMo.paused = false;
+    g_slowMo.label = true;
+    g_slowMo.messageUntil = {};
+}
+
+static void SlowMoStep(int direction)
+{
+    if (g_slowMo.state != SLOWMO_PLAYING) return;
+    const int count = (int)g_frameGen->SlowMoFrames().size();
+    g_slowMo.paused = true;
+    g_slowMo.index = (g_slowMo.index + direction + count) % count;
+}
+
+// 녹화를 시작할 때가 됐는지 확인하고 프레임을 담을 자리를 잡는다.
+static void SlowMoUpdateBeforeCapture(ScalingSession* s)
+{
+    if (g_slowMo.state != SLOWMO_WAITING || !g_frameGen || !s->srcTex || NowSeconds() < g_slowMo.startAt) return;
+    const uint64_t bytes = uint64_t(s->srcW) * s->srcH * 4 * g_settings.slowMoTargetFps * g_settings.slowMoSeconds;
+    if (bytes > kSlowMoMaxBytes) {
+        SlowMoFail(L"프레임을 담을 메모리가 모자라요. 녹화 길이나 목표 fps를 줄여 주세요.");
+        return;
+    }
+    try {
+        g_frameGen->SlowMoBegin(s->srcTex.get(), s->srcW, s->srcH, (int)std::ceil(g_settings.slowMoSeconds * s->refreshHz) + 4);
+    } catch (const winrt::hresult_error&) {
+        SlowMoFail(L"프레임을 담을 메모리를 잡지 못했어요.");
+        return;
+    }
+    g_frameGen->SetProfile(&s->profile);
+    s->fgWasOn = false;
+    g_slowMo.w = s->srcW;
+    g_slowMo.h = s->srcH;
+    g_slowMo.recordStart = NowSeconds();
+    g_slowMo.state = SLOWMO_RECORDING;
 }
 
 static FgOptions CurrentFgOptions(const ScalingSession* s)
@@ -982,39 +1118,66 @@ static FgOptions CurrentFgOptions(const ScalingSession* s)
     return o;
 }
 
+// 캡처 프레임의 보이는 영역을 원본 텍스처로 복사한다. 보이는 영역이 없으면 false.
+static bool CopyCaptureFrame(ScalingSession* s, const wgc::Direct3D11CaptureFrame& frame, double& frameTime)
+{
+    auto contentSize = frame.ContentSize();
+    if (contentSize.Width != s->poolSize.Width || contentSize.Height != s->poolSize.Height) {
+        // 대상 창 크기가 바뀌면 프레임 풀을 다시 만든다.
+        s->poolSize = contentSize;
+        s->framePool.Recreate(g_winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, contentSize);
+    }
+
+    auto access = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+    com_ptr<ID3D11Texture2D> frameTex;
+    check_hresult(access->GetInterface(IID_PPV_ARGS(frameTex.put())));
+
+    D3D11_BOX box;
+    RECT visible;
+    if (!GetVisibleClient(s, contentSize.Width, contentSize.Height, box, visible)) return false;
+    EnsureTexture(s->srcTex, s->srcSrv, nullptr, s->srcW, s->srcH, box.right - box.left, box.bottom - box.top);
+    g_ctx->CopySubresourceRegion(s->srcTex.get(), 0, 0, 0, 0, frameTex.get(), 0, &box);
+    frameTime = frame.SystemRelativeTime().count() / 1e7;  // QPC 기준 캡처 시각 (100ns 단위)
+    return true;
+}
+
+static void SlowMoRecordCapture(ScalingSession* s, double frameTime)
+{
+    if (!g_frameGen->SlowMoRecord(s->srcTex.get(), s->srcW, s->srcH, frameTime))
+        SlowMoFail(L"녹화 중에 창 크기가 바뀌었어요.");
+}
+
 static void RenderFrame()
 {
     auto s = g_scaling;
     bool newFrame = false;
     double frameTime = 0;
 
-    // 1. 가장 최신 캡처 프레임만 사용한다.
+    if (!g_frameGen && g_frameGenLoading.valid() &&
+        g_frameGenLoading.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        g_frameGen = g_frameGenLoading.get();
+    SlowMoUpdateBeforeCapture(s);
+    if (g_slowMo.state == SLOWMO_RECORDING) g_ctx->ClearState();  // 녹화는 계산 셰이더를 쓰므로 Direct2D가 남긴 상태를 먼저 지운다
+
+    // 1. 가장 최신 캡처 프레임만 사용한다. 녹화 중에는 사이에 온 프레임도 버리지 않는다.
     wgc::Direct3D11CaptureFrame frame{ nullptr };
     while (auto next = s->framePool.TryGetNextFrame()) {
+        if (frame && g_slowMo.state == SLOWMO_RECORDING && CopyCaptureFrame(s, frame, frameTime)) SlowMoRecordCapture(s, frameTime);
         frame = next;
         s->capturedFrames++;
     }
 
-    if (frame) {
-        auto contentSize = frame.ContentSize();
-        if (contentSize.Width != s->poolSize.Width || contentSize.Height != s->poolSize.Height) {
-            // 대상 창 크기가 바뀌면 프레임 풀을 다시 만든다.
-            s->poolSize = contentSize;
-            s->framePool.Recreate(g_winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, contentSize);
-        }
+    if (frame && CopyCaptureFrame(s, frame, frameTime)) {
+        newFrame = true;
+        if (g_slowMo.state == SLOWMO_RECORDING) SlowMoRecordCapture(s, frameTime);
+    }
 
-        auto access = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
-        com_ptr<ID3D11Texture2D> frameTex;
-        check_hresult(access->GetInterface(IID_PPV_ARGS(frameTex.put())));
-
-        D3D11_BOX box;
-        RECT visible;
-        if (GetVisibleClient(s, contentSize.Width, contentSize.Height, box, visible)) {
-            EnsureTexture(s->srcTex, s->srcSrv, nullptr, s->srcW, s->srcH, box.right - box.left, box.bottom - box.top);
-            g_ctx->CopySubresourceRegion(s->srcTex.get(), 0, 0, 0, 0, frameTex.get(), 0, &box);
-            newFrame = true;
-            frameTime = frame.SystemRelativeTime().count() / 1e7;  // QPC 기준 캡처 시각 (100ns 단위)
-        }
+    if (g_slowMo.state == SLOWMO_RECORDING &&
+        (g_frameGen->SlowMoSpan() >= g_settings.slowMoSeconds || g_frameGen->SlowMoFull() ||
+         NowSeconds() - g_slowMo.recordStart > g_settings.slowMoSeconds + 1.5)) {
+        if (g_frameGen->SlowMoStartGenerating(g_settings.slowMoTargetFps, g_settings.slowMoTargetFps * g_settings.slowMoSeconds))
+            g_slowMo.state = SLOWMO_GENERATING;
+        else SlowMoFail(L"화면이 움직이지 않아 만들 프레임이 없어요.");
     }
 
     // 2. 원본 영역(창이 움직였을 수 있으므로 매 프레임), 출력 영역, 커서 위치 처리
@@ -1047,10 +1210,42 @@ static void RenderFrame()
         // 프레임 생성: 켜져 있으면 업스케일에 들어갈 영상을 합성 결과로 바꾼다.
         ID3D11ShaderResourceView* displaySrv = s->srcSrv.get();
         ID3D11ShaderResourceView* compareSrv = displaySrv;
-        if (!g_frameGen && g_frameGenLoading.valid() &&
-            g_frameGenLoading.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-            g_frameGen = g_frameGenLoading.get();
-        if (g_settings.frameGen && g_frameGen) {
+        UINT contentW = s->srcW, contentH = s->srcH;
+        if (g_slowMo.state == SLOWMO_GENERATING) {
+            FgOptions options = CurrentFgOptions(s);
+            options.learn = false;
+            try {
+                if (g_frameGen->SlowMoGenerateStep(options)) {
+                    if (!g_slowMo.dumpDir.empty()) {
+                        CreateDirectoryW(g_slowMo.dumpDir.c_str(), nullptr);
+                        const auto& frames = g_frameGen->SlowMoFrames();
+                        for (int i = 0; i < (int)frames.size(); i++) {
+                            wchar_t name[64];
+                            swprintf_s(name, L"\\frame_%03d_%ls.bmp", i, frames[i].generated ? L"gen" : L"real");
+                            SaveFrameBmp(g_slowMo.dumpDir + name, g_frameGen->SlowMoReadFrame(i), g_slowMo.w, g_slowMo.h);
+                        }
+                    }
+                    g_slowMo.index = g_slowMo.vsyncs = g_slowMo.loopWait = 0;
+                    // 주사율이 목표 fps보다 높으면 한 장을 더 오래 보여 줘 실제 시간보다 빨라지지 않게 한다.
+                    g_slowMo.holdVsyncs = std::max(1, (int)std::ceil(s->refreshHz / g_settings.slowMoTargetFps - 0.01));
+                    g_slowMo.state = SLOWMO_PLAYING;
+                    SlowMoSetPlaybackKeys(true);
+                    printf("\n[슬로모션] 진짜 %d장으로 %d장을 만들었습니다.\n", g_frameGen->SlowMoRealCount(), (int)g_frameGen->SlowMoFrames().size());
+                }
+            } catch (const winrt::hresult_error&) {
+                SlowMoFail(L"프레임을 담을 메모리를 잡지 못했어요.");
+            }
+        }
+        if (g_slowMo.state == SLOWMO_PLAYING) {
+            const auto& f = g_frameGen->SlowMoFrames()[g_slowMo.index];
+            displaySrv = f.srv;
+            compareSrv = f.held;
+            contentW = g_slowMo.w;
+            contentH = g_slowMo.h;
+            if (g_fgLog) fprintf(g_fgLog, "slowmo,%.6f,%d,%d,%.3f,%d\n", NowSeconds(), g_slowMo.index, f.real, f.t, f.generated ? 1 : 0);
+        } else if (g_slowMo.state != SLOWMO_OFF) {
+            // 녹화와 생성 중에는 지금 화면을 보간 없이 보여 준다.
+        } else if (g_settings.frameGen && g_frameGen) {
             if (!s->fgWasOn) {
                 g_frameGen->Reset();
                 g_frameGen->SetProfile(&s->profile);
@@ -1086,7 +1281,7 @@ static void RenderFrame()
         if (fsr) {
             // 샤프닝 1.0 -> RCAS 0스톱(최대), 0.5 -> 1스톱, 0.0에 가까울수록 약하게
             FsrParams fp = {};
-            ComputeFsrParams(fp, (float)s->srcW, (float)s->srcH, (float)dstW, (float)dstH,
+            ComputeFsrParams(fp, (float)contentW, (float)contentH, (float)dstW, (float)dstH,
                              (1.0f - g_settings.sharpness) * 2.0f);
             fp.outputOffset[0] = (int32_t)offX;
             fp.outputOffset[1] = (int32_t)offY;
@@ -1098,7 +1293,7 @@ static void RenderFrame()
 
         // Pass 1: 업스케일 (FSR 모드는 EASU)
         D3D11_VIEWPORT vp1 = { 0, 0, (float)dstW, (float)dstH, 0, 1 };
-        DrawPass(s->midRtv.get(), vp1, fsr ? g_psEasu.get() : g_psScale.get(), displaySrv, s->srcW, s->srcH);
+        DrawPass(s->midRtv.get(), vp1, fsr ? g_psEasu.get() : g_psScale.get(), displaySrv, contentW, contentH);
 
         // Pass 2: 샤프닝하면서 백버퍼 중앙에 출력 (FSR 모드는 RCAS, 샤프닝 0이면 그대로 복사)
         D3D11_VIEWPORT vp2 = { offX, offY, (float)dstW, (float)dstH, 0, 1 };
@@ -1113,7 +1308,7 @@ static void RenderFrame()
             D3D11_RECT left = { (LONG)offX, (LONG)offY, half, (LONG)offY + (LONG)dstH };
             g_ctx->RSSetState(g_rsScissor.get());
             g_ctx->RSSetScissorRects(1, &left);
-            DrawPass(s->backBufferRtv.get(), vp2, g_psScale.get(), compareSrv, s->srcW, s->srcH, 0.0f, MODE_BILINEAR);
+            DrawPass(s->backBufferRtv.get(), vp2, g_psScale.get(), compareSrv, contentW, contentH, 0.0f, MODE_BILINEAR);
             g_ctx->RSSetState(nullptr);
 
             D3D11_VIEWPORT line = { (float)(half - 1), offY, 2, (float)dstH, 0, 1 };
@@ -1125,6 +1320,13 @@ static void RenderFrame()
 
         // Pass 4: 화면 위 상태 표시
         DrawOsd(s);
+
+        // 슬로모션 재생은 시간이 아니라 화면을 그린 횟수로 넘긴다. 그려야 할 때를 놓쳐도 건너뛰는 프레임이 없다.
+        if (g_slowMo.state == SLOWMO_PLAYING && !g_slowMo.paused && ++g_slowMo.vsyncs >= g_slowMo.holdVsyncs) {
+            g_slowMo.vsyncs = 0;
+            if (g_slowMo.index + 1 < (int)g_frameGen->SlowMoFrames().size()) g_slowMo.index++;
+            else if (++g_slowMo.loopWait >= kSlowMoLoopWait) g_slowMo.index = g_slowMo.loopWait = 0;
+        }
     }
 
     // 3. 수직동기에 맞춰 출력
@@ -1189,6 +1391,11 @@ static bool HandleHotkey(int id)
         g_settings.compare = !g_settings.compare;
         break;
     case HK_OSD:
+        // 슬로모션 재생 중에는 프레임 글자를 끄고 켠다. 글자 없이 화면만 볼 수 있게 한다.
+        if (g_slowMo.state == SLOWMO_PLAYING) {
+            g_slowMo.label = !g_slowMo.label;
+            return true;
+        }
         g_settings.osdAlways = !g_settings.osdAlways;
         break;
     case HK_CURSOR_SPEED:
@@ -1197,6 +1404,18 @@ static bool HandleHotkey(int id)
     case HK_FRAMEGEN:
         g_settings.frameGen = !g_settings.frameGen;
         break;
+    case HK_SLOWMO:
+        SlowMoToggle(0);
+        return true;
+    case HK_SLOWMO_PAUSE:
+        g_slowMo.paused = !g_slowMo.paused;
+        return true;
+    case HK_SLOWMO_PREV:
+        SlowMoStep(-1);
+        return true;
+    case HK_SLOWMO_NEXT:
+        SlowMoStep(1);
+        return true;
     case HK_SHARP_UP:
         g_settings.sharpness = std::min(1.0f, g_settings.sharpness + 0.1f);
         break;
@@ -1224,6 +1443,7 @@ void AppSettingsChanged()
 
 void AppStartScaling(HWND target) { StartScaling(target); }
 void AppStopScaling() { StopScaling(); }
+void AppSlowMoToggle(double delaySeconds) { SlowMoToggle(delaySeconds); }
 const std::wstring& AppSettingsPath() { return g_settingsPath; }
 
 ScalingStatus AppGetStatus()
@@ -1248,6 +1468,15 @@ ScalingStatus AppGetStatus()
         st.fgRifeState = fg.rifeState;
         st.fgRifeMs = fg.rifeMs;
     }
+    st.refreshHz = g_scaling->refreshHz;
+    st.slowMoState = g_slowMo.state;
+    if (g_frameGen && g_slowMo.state == SLOWMO_GENERATING) {
+        st.slowMoDone = (int)g_frameGen->SlowMoFrames().size();
+        st.slowMoTotal = g_frameGen->SlowMoTotal();
+    } else if (g_frameGen && g_slowMo.state == SLOWMO_PLAYING) {
+        st.slowMoDone = g_slowMo.index + 1;
+        st.slowMoTotal = (int)g_frameGen->SlowMoFrames().size();
+    }
     return st;
 }
 
@@ -1261,7 +1490,7 @@ static void RegisterHotkeys()
         { HK_INTEGER, 'I', "Alt+Shift+I" },       { HK_SHARP_UP, VK_UP, "Alt+Shift+Up" },
         { HK_SHARP_DOWN, VK_DOWN, "Alt+Shift+Down" }, { HK_COMPARE, 'C', "Alt+Shift+C" },
         { HK_OSD, 'O', "Alt+Shift+O" },           { HK_CURSOR_SPEED, 'P', "Alt+Shift+P" },
-        { HK_FRAMEGEN, 'F', "Alt+Shift+F" },
+        { HK_FRAMEGEN, 'F', "Alt+Shift+F" },      { HK_SLOWMO, 'T', "Alt+Shift+T" },
         { HK_QUIT, 'Q', "Alt+Shift+Q" },
     };
     for (auto& k : keys) {
@@ -1304,6 +1533,7 @@ static void PrintHelp()
            "  Alt+Shift+O     화면 위 상태 표시 항상 켜기/끄기\n"
            "  Alt+Shift+P     커서 속도 보정 켜기/끄기 (확대 중 마우스 속도를 배율만큼 낮춤)\n"
            "  Alt+Shift+F     프레임 보간 켜기/끄기\n"
+           "  Alt+Shift+T     슬로모션 테스트 시작/끝내기 (녹화 -> 프레임 생성 -> 느리게 재생)\n"
            "  Alt+Shift+Up    샤프닝 강하게\n"
            "  Alt+Shift+Down  샤프닝 약하게\n"
            "  Alt+Shift+Q     프로그램 종료\n"
@@ -1331,6 +1561,7 @@ int wmain(int argc, wchar_t** argv)
     std::wstring targetTitle;
     std::wstring fgSelfTestDir;
     double duration = 0;
+    double slowMoAuto = -1;
     bool useGui = true;
     for (int i = 1; i < argc; i++) {
         std::wstring a = argv[i];
@@ -1358,6 +1589,10 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--fg-rife") g_settings.fgGenerator = FG_GENERATOR_RIFE;
         else if (a == L"--fg-visualize") g_settings.fgVisualize = true;
         else if (a == L"--fg-log" && i + 1 < argc) _wfopen_s(&g_fgLog, argv[++i], L"w");
+        else if (a == L"--slowmo-auto" && i + 1 < argc) slowMoAuto = _wtof(argv[++i]);
+        else if (a == L"--slowmo-target" && i + 1 < argc) g_settings.slowMoTargetFps = std::clamp(_wtoi(argv[++i]), 30, 1000);
+        else if (a == L"--slowmo-seconds" && i + 1 < argc) g_settings.slowMoSeconds = std::clamp(_wtoi(argv[++i]), 1, 3);
+        else if (a == L"--slowmo-dump" && i + 1 < argc) g_slowMo.dumpDir = argv[++i];
     }
 
     // 시스템 커서를 숨기는 데 Magnification API를 사용한다.
@@ -1397,6 +1632,7 @@ int wmain(int argc, wchar_t** argv)
                 return 1;
             }
             StartScaling(hwnd);
+            if (slowMoAuto >= 0) SlowMoToggle(slowMoAuto);
         }
 
         auto startTime = Clock::now();

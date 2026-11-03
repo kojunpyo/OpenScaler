@@ -407,3 +407,8 @@ int RunFrameGenSelfTest(ID3D11Device* device, ID3D11DeviceContext* context, cons
 
     return 0;
 }
+
+void SaveFrameBmp(const std::wstring& path, const std::vector<uint32_t>& rgba, int w, int h)
+{
+    SaveBmp(path, rgba, w, h);
+}
