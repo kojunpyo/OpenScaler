@@ -977,9 +977,33 @@ bool FrameGen::SlowMoGenerateStep(const FgOptions& options)
     shown.real = index;
     m_slowMoFrames.push_back(shown);
 
-    if (count > 1 && gap >= kPauseGap) {
-        // 게임이 멈췄던 구간은 보간하지 않고 진짜 프레임을 그대로 둔다.
+    // 외삽은 실시간과 같이 다음 진짜 프레임을 쓰지 않고, 바로 앞 두 장의 움직임을 이어서 예측한다.
+    const bool extrapolate = options.method == FG_METHOD_EXTRAPOLATE;
+    const double prevGap = index > 0 ? m_slowMoTimes[index] - m_slowMoTimes[index - 1] : 0;
+    if (count > 1 && (gap >= kPauseGap || (extrapolate && (index == 0 || prevGap >= kPauseGap)))) {
+        // 게임이 멈췄던 구간은 보간하지 않고 진짜 프레임을 그대로 둔다. 외삽할 앞 프레임이 없을 때도 같다.
         for (int j = 1; j < count; j++) m_slowMoFrames.push_back(shown);
+    } else if (count > 1 && extrapolate) {
+        Frame& a = m_frames[1];
+        Frame& b = m_frames[0];
+        m_ctx->CopyResource(a.color.get(), m_slowMoReal[index - 1].tex.get());
+        m_ctx->CopyResource(b.color.get(), first.tex.get());
+        BuildPyramid(a);
+        BuildPyramid(b);
+        const FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        FlowSet& set = GetFlowSet(params.cellPx);
+        UpdateMapTexture();
+        const bool useMap = options.useMap && params.useMap && m_profile && m_profile->mapSamples >= 20;
+        Estimate(a, b, params, set, true, useMap, prevGap);
+        for (int j = 1; j < count; j++) {
+            m_slowMoGenerated.push_back(MakeTarget(m_w, m_h, DXGI_FORMAT_R8G8B8A8_UNORM, true));
+            const Target& out = m_slowMoGenerated.back();
+            shown.srv = out.srv.get();
+            shown.t = (float)std::min(1.0 + gap * j / count / prevGap, (double)kMaxExtrapolate);
+            shown.generated = true;
+            Synthesize(a, b, set, shown.t, params, out.uav.get());
+            m_slowMoFrames.push_back(shown);
+        }
     } else if (count > 1) {
         Frame& a = m_frames[1];
         Frame& b = m_frames[0];
