@@ -875,7 +875,7 @@ void DrawUi()
         s.slowMoSeconds = slowMoSecondIndex + 1;
         changed = true;
     }
-    HelpMarker("생성기와 품질은 위 프레임 생성 설정을 따르고, 방식은 항상 보간이에요.\n"
+    HelpMarker("생성기, 품질, 방식은 위 프레임 생성 설정을 따라요. 외삽은 블록 매칭으로만 만들어요.\n"
                "느린 GPU에서도 모든 장면을 만들 수 있지만, 실제 지연과 끊김은 이 테스트로 확인할 수 없어요.");
     {
         char slowMoText[96];
