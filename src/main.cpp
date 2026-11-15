@@ -702,7 +702,39 @@ static std::wstring GameNameOf(HWND hwnd)
         }
         CloseHandle(proc);
     }
-    return name;
+
+    // javaw처럼 여러 게임이 함께 쓰는 실행 파일이면 이름만으로는 게임을 구분할 수 없다.
+    // 이때는 창 제목에서 게임 이름을 뽑아 붙인다. 예: "Minecraft 26.3 - 싱글플레이" -> "Minecraft (javaw)"
+    static const wchar_t* const kSharedHosts[] = { L"javaw", L"java", L"python", L"pythonw", L"node", L"electron", L"love", L"nw" };
+    bool shared = false;
+    for (const wchar_t* host : kSharedHosts) shared = shared || _wcsicmp(name.c_str(), host) == 0;
+    if (!shared) return name;
+
+    wchar_t titleBuf[256] = {};
+    GetWindowTextW(hwnd, titleBuf, ARRAYSIZE(titleBuf));
+    std::wstring title = titleBuf;
+    // " - 싱글플레이"처럼 뒤에 붙는 상태 표시는 바뀔 수 있으므로 버린다.
+    for (const wchar_t* sep : { L" - ", L" \x2014 ", L" | " }) {
+        size_t at = title.find(sep);
+        if (at != std::wstring::npos) title.resize(at);
+    }
+    // 버전 번호(26.3, v1.2 같은 낱말)는 업데이트마다 바뀌므로 뺀다.
+    std::wstring game, word;
+    auto flush = [&] {
+        bool version = !word.empty();
+        for (size_t i = 0; i < word.size(); i++) {
+            const wchar_t c = word[i];
+            if (!(iswdigit(c) || c == L'.' || (i == 0 && (c == L'v' || c == L'V') && word.size() > 1))) version = false;
+        }
+        if (!word.empty() && !version) game += (game.empty() ? L"" : L" ") + word;
+        word.clear();
+    };
+    for (wchar_t c : title) {
+        if (c == L' ') flush();
+        else if (!wcschr(L"\\/:*?\"<>|", c) && c >= 32) word += c;  // 파일 이름에 쓸 수 없는 글자는 뺀다
+    }
+    flush();
+    return game.empty() ? name : game + L" (" + name + L")";
 }
 
 static void StartScaling(HWND target)
