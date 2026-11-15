@@ -3,6 +3,32 @@
 // 런타임에 D3DCompile로 컴파일되는 HLSL 소스.
 // Pass 1 (PSScale)  : 캡처한 원본을 출력 크기로 업스케일
 // Pass 2 (PSSharpen): 업스케일 결과에 대비 적응형 샤프닝(CAS 아이디어 기반) 적용
+//
+// 아래 Bicubic 함수는 MJP의 "SampleTextureCatmullRom"을 이 프로그램의 상수와 샘플러에 맞게 옮긴 것이다.
+// 원본: https://gist.github.com/TheRealMJP/c83b8c0f46b63f3a88a5986f4fa982b1
+// 원본 라이선스 (https://gist.github.com/TheRealMJP/bc503b0b87b643d3505d41eab8b332ae):
+//
+//   MIT License
+//
+//   Copyright (c) 2019 MJP
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a copy
+//   of this software and associated documentation files (the "Software"), to deal
+//   in the Software without restriction, including without limitation the rights
+//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//   copies of the Software, and to permit persons to whom the Software is
+//   furnished to do so, subject to the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included in all
+//   copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//   SOFTWARE.
 static const char kShaderSource[] = R"(
 cbuffer Params : register(b0)
 {
@@ -48,7 +74,7 @@ float3 Bilinear(float2 uv)
     return tex.SampleLevel(linSamp, uv, 0).rgb;
 }
 
-// Catmull-Rom 바이큐빅. 16탭 대신 선형 샘플러를 이용해 9탭으로 계산한다.
+// Catmull-Rom 바이큐빅. 16탭 대신 선형 샘플러를 이용해 9탭으로 계산한다. (MJP의 코드를 옮김, 파일 맨 위 라이선스 참고)
 float3 Bicubic(float2 uv)
 {
     float2 samplePos = uv * srcSize;

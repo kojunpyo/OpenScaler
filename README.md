@@ -225,15 +225,13 @@ FgPreset=0            ; 화면 지도. 0: 자동, 1: 끔
 ## 동작 원리
 
 ```mermaid
-flowchart LR
-    A["게임 창<br/>(낮은 해상도)"] --> B["화면 캡처<br/>게임 화면만 잘라내기"]
-    B --> C{"프레임 생성<br/>켰나?"}
-    C -- 예 --> D["움직임 찾기<br/>프레임 합성"]
-    C -- 아니요 --> E
-    D --> E["업스케일<br/>(FSR 1.0 등)"]
+flowchart TD
+    A["게임 창 (낮은 해상도)"] --> B["화면 캡처, 게임 화면만 잘라내기"]
+    B --> D["프레임 생성 (켠 경우): 움직임 찾기, 프레임 합성"]
+    D --> E["업스케일 (FSR 1.0 등)"]
     E --> F["샤프닝"]
-    F --> G["전체화면 출력<br/>+ 커서 그리기"]
-    G -. 클릭은 그대로 .-> A
+    F --> G["전체화면 출력, 커서 그리기"]
+    G -. 클릭은 원래 창으로 .-> A
 ```
 
 | 단계 | 쓰는 기술 | 하는 일 |
@@ -371,6 +369,7 @@ OpenScaler.exe --target "창 제목 일부" --mode 4 --sharp 0.5 --fg --duration
 - [AMD FidelityFX CAS / FSR (GPUOpen)](https://gpuopen.com/fidelityfx-superresolution/) - 샤프닝 아이디어
 - [AMD FidelityFX FSR 1.0 소스](https://github.com/GPUOpen-Effects/FidelityFX-FSR) - `third_party/fsr`에 포함
 - [Practical-RIFE](https://github.com/hzwer/Practical-RIFE) - RIFE 신경망 구조와 학습 모델
+- [MJP, Catmull-Rom 9탭 샘플링](https://gist.github.com/TheRealMJP/c83b8c0f46b63f3a88a5986f4fa982b1) - Bicubic 모드의 셰이더 코드 (`src/shaders.h`에 옮김, MIT)
 - [Magpie](https://github.com/Blinue/Magpie) - 같은 목적의 오픈소스 프로젝트. 구조 참고용으로만 살펴봤으며 코드는 가져오지 않았습니다.
 - [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) - 기능 아이디어의 출처
 
@@ -384,5 +383,6 @@ OpenScaler.exe --target "창 제목 일부" --mode 4 --sharp 0.5 --fg --duration
 - `third_party/imgui`의 Dear ImGui는 Omar Cornut의 저작물이며 MIT 라이선스를 따릅니다 ([third_party/imgui/LICENSE.txt](third_party/imgui/LICENSE.txt)).
 - `third_party/onnxruntime`의 헤더는 Microsoft의 저작물이며 MIT 라이선스를 따릅니다 ([third_party/onnxruntime/LICENSE](third_party/onnxruntime/LICENSE)).
 - `tools/rife_export.py`의 신경망 구조는 [Practical-RIFE](https://github.com/hzwer/Practical-RIFE)(MIT, Copyright (c) 2021 hzwer)를 옮긴 것입니다. 학습 모델도 같은 MIT로 공개되어 있습니다.
+- `src/shaders.h`의 Bicubic 함수는 MJP의 [Catmull-Rom 샘플링 코드](https://gist.github.com/TheRealMJP/c83b8c0f46b63f3a88a5986f4fa982b1)(MIT, Copyright (c) 2019 MJP)를 옮긴 것입니다. 라이선스 전문은 파일 맨 위에 있습니다.
 - `rife` 폴더를 쓸 때의 DirectML.dll은 오픈소스가 아니며 Microsoft의 라이선스를 따릅니다. 폴더 안의 `LICENSE-DirectML.txt`를 함께 두어야 합니다.
 - `third_party/galmuri`의 Galmuri11 Bold와 Galmuri11 Condensed는 이민서(quiple)의 저작물이며 SIL Open Font License 1.1을 따릅니다 ([third_party/galmuri/OFL.md](third_party/galmuri/OFL.md)). 원작자 설명에 따르면 이 두 글꼴의 글리프는 모두 원작자의 창작물이라, 다른 게임 글꼴의 저작권 문제 없이 쓸 수 있습니다.
