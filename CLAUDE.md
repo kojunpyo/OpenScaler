@@ -17,14 +17,14 @@
 
 ```powershell
 $vs="C:\Program Files\Microsoft Visual Studio\18\Community"
-cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build 2>&1"
+cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build 2>&1"
 ```
 
 - 결과물은 `buildOpenScaler.exe`. 빌드 후 프로젝트 루트의 `OpenScaler.exe`로 복사해 사용자가 쓰게 한다.
 - 사용자가 루트 exe를 실행 중이면 복사가 실패한다. 프로세스를 끄지 말고 알린다.
 - exe, `build/`, `OpenScaler.ini`, `profiles/`, `rife/`는 git에 올리지 않는다.
 - RIFE를 시험하려면 `rife` 폴더를 `build\`에도 두어야 한다 (`build\OpenScaler.exe`는 자기 옆에서 찾는다).
-- 이 PC에서는 Ninja가 헤더 의존성을 추적하지 못한다 (`build.ninja`의 `msvc_deps_prefix`가 깨진 한글로 저장됨). 헤더만 바꾸면 다시 컴파일되지 않고, 클래스 멤버를 바꾸면 옛 크기로 컴파일된 파일이 남아 힙 손상으로 죽는다. 헤더를 바꾼 뒤에는 `src\*.cpp`의 수정 시각을 갱신하고 빌드한다.
+- `chcp 949`는 빼지 않는다. Ninja는 컴파일러의 "참고: 포함 파일:" 줄로 헤더 의존성을 기록하는데, CMake는 이 문구를 시스템 코드 페이지(949)로 저장하고 컴파일러는 콘솔 코드 페이지로 출력한다. Claude가 쓰는 셸은 65001(UTF-8)이라 둘이 어긋나면 의존성이 하나도 기록되지 않는다. 그러면 헤더만 바꿨을 때 다시 컴파일되지 않고, 클래스 멤버를 바꾸면 옛 크기로 컴파일된 파일이 남아 힙 손상으로 죽는다. 확인: `ninja -t deps CMakeFiles/OpenScaler.dir/src/main.cpp.obj`가 `#deps 0`이 아니어야 한다.
 - GitHub CLI(`gh`)는 없다. Actions 결과는 공개 API로 확인한다 (`tools/test/waitci.ps1`).
 
 ## 구조
