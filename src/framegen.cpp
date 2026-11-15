@@ -689,7 +689,7 @@ void FrameGen::PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, c
     }
 }
 
-void FrameGen::EnsureRife(int quality, bool adapt)
+bool FrameGen::EnsureRife(int quality, bool adapt)
 {
     if (!m_rife) {
         const std::wstring directory = RifeEngine::DefaultDirectory();
@@ -713,14 +713,19 @@ void FrameGen::EnsureRife(int quality, bool adapt)
     int target = std::min(kHeights[std::clamp(quality, 0, FG_QUALITY_COUNT - 1)], m_rifeHeightLimit);
     int h = std::max(64, std::min(target, (int)m_h + 63) / 64 * 64);
     int w = std::max(64, (int)std::lround((double)m_w / m_h * h / 64.0) * 64);
-    m_stats.rifeHeight = h;
-    if ((UINT)w != m_rifeW || (UINT)h != m_rifeH) {
-        m_rifeW = w;
-        m_rifeH = h;
-        m_rifeInput = MakeTarget(w, h, DXGI_FORMAT_R8G8B8A8_UNORM, true);
+    m_rife->SetInputSize(w, h);
+
+    // 새 크기의 세션이 준비될 때까지는 엔진이 지금 처리할 수 있는 크기로 입력을 만든다.
+    int activeW = 0, activeH = 0;
+    if (!m_rife->ActiveSize(activeW, activeH)) return false;
+    m_stats.rifeHeight = activeH;
+    if ((UINT)activeW != m_rifeW || (UINT)activeH != m_rifeH) {
+        m_rifeW = activeW;
+        m_rifeH = activeH;
+        m_rifeInput = MakeTarget(activeW, activeH, DXGI_FORMAT_R8G8B8A8_UNORM, true);
         m_rifePrevious.clear();
-        m_rife->SetInputSize(w, h);
     }
+    return activeW == w && activeH == h;
 }
 
 std::vector<float> FrameGen::RifePrepare(const Frame& f)
@@ -759,12 +764,10 @@ void FrameGen::RifeUpload(const RifeEngine::Result& result)
     if ((UINT)result.w != slot.w || (UINT)result.h != slot.h) {
         slot.w = result.w;
         slot.h = result.h;
-        slot.flow = MakeTarget(result.w, result.h, DXGI_FORMAT_R32G32B32A32_FLOAT, false);
-        slot.mask = MakeTarget(result.w, result.h, DXGI_FORMAT_R32_FLOAT, false);
+        slot.planes = MakeTarget(result.w, result.h * 5, DXGI_FORMAT_R32_FLOAT, false);
     }
     slot.seq = result.seq;
-    m_ctx->UpdateSubresource(slot.flow.tex.get(), 0, nullptr, result.flow.data(), result.w * 4 * sizeof(float), 0);
-    m_ctx->UpdateSubresource(slot.mask.tex.get(), 0, nullptr, result.mask.data(), result.w * sizeof(float), 0);
+    m_ctx->UpdateSubresource(slot.planes.tex.get(), 0, nullptr, result.planes.data(), result.w * sizeof(float), 0);
 }
 
 void FrameGen::RifeCompose(const Frame& a, const Frame& b, const RifeFlow& rife, float t, ID3D11UnorderedAccessView* out)
@@ -773,7 +776,7 @@ void FrameGen::RifeCompose(const Frame& a, const Frame& b, const RifeFlow& rife,
     cb.t = t;
     cb.lvlSize[0] = (int)rife.w;
     cb.lvlSize[1] = (int)rife.h;
-    Run(m_csRifeCompose.get(), { a.colorSrv.get(), b.colorSrv.get(), rife.flow.srv.get(), rife.mask.srv.get() }, out, cb,
+    Run(m_csRifeCompose.get(), { a.colorSrv.get(), b.colorSrv.get(), rife.planes.srv.get() }, out, cb,
         (m_w + 7) / 8, (m_h + 7) / 8);
 }
 
@@ -796,6 +799,7 @@ ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
         if (m_rife->TakeResult(result)) {
             // 보관 중인 프레임 쌍의 결과만 쓴다. 더 늦은 결과는 이미 지나갔다.
             if (result.seq >= m_stats.realFrames - 1) RifeUpload(result);
+            m_rife->Recycle(std::move(result.planes));
         }
         m_stats.rifeState = m_rife->GetState();
         m_stats.rifeMs = m_rife->AverageMs();
@@ -981,9 +985,9 @@ bool FrameGen::SlowMoGenerateStep(const FgOptions& options)
     bool useRife = options.generator == FG_GENERATOR_RIFE;
     m_slowMoRifeLoading = false;
     if (useRife) {
-        EnsureRife(options.quality, false);
+        const bool sizeReady = EnsureRife(options.quality, false);
         const RifeEngine::State state = m_rife->GetState();
-        if (state == RifeEngine::STATE_LOADING) {
+        if (state == RifeEngine::STATE_LOADING || (state == RifeEngine::STATE_READY && !sizeReady)) {
             m_slowMoRifeLoading = true;
             return false;
         }
@@ -1227,13 +1231,13 @@ void FrameGen::TestUpdateMapTexture()
 
 bool FrameGen::TestRifeRun(int a, int b, int quality)
 {
-    EnsureRife(quality, false);
-    while (m_rife->GetState() == RifeEngine::STATE_LOADING) Sleep(10);
+    while (!EnsureRife(quality, false) && m_rife->GetState() != RifeEngine::STATE_FAILED) Sleep(10);
     if (m_rife->GetState() != RifeEngine::STATE_READY) return false;
 
     RifeEngine::Result result;
     if (!m_rife->RunBlocking(RifePrepare(m_frames[a]), RifePrepare(m_frames[b]), (int)m_rifeW, (int)m_rifeH, result)) return false;
     RifeUpload(result);
+    m_rife->Recycle(std::move(result.planes));
     m_rifeLastInferMs = (float)result.ms;
     return true;
 }

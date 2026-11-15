@@ -158,7 +158,7 @@ private:
 
     // 프레임 쌍 하나의 RIFE 결과
     struct RifeFlow {
-        Target flow, mask;
+        Target planes;  // 신경망 출력 평면 5장을 세로로 이어 붙인 텍스처 (w x h*5)
         UINT w = 0, h = 0;
         long long seq = -1;
     };
@@ -208,7 +208,7 @@ private:
     void PollReadbacks();
     void UpdateMapTexture();
 
-    void EnsureRife(int quality, bool adapt);
+    bool EnsureRife(int quality, bool adapt);  // 원하는 입력 크기로 돌 수 있으면 true
     std::vector<float> RifePrepare(const Frame& f);
     void RifeUpload(const RifeEngine::Result& result);
     void RifeCompose(const Frame& a, const Frame& b, const RifeFlow& rife, float t, ID3D11UnorderedAccessView* out);

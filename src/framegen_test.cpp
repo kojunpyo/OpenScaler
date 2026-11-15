@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "framegen.h"
+#include "rife.h"
 
 namespace {
 
@@ -647,5 +648,51 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
         profileCsv << c.gap << "," << t << "," << sum[0] * k << "," << sum[1] * k << "," << sum[2] * k << "," << sum[3] * k << "\n";
     }
     fg.SetProfile(nullptr);
+    return 0;
+}
+
+int RunRifeBench(const std::wstring& outDir)
+{
+    CreateDirectoryW(outDir.c_str(), nullptr);
+    RifeEngine engine(RifeEngine::DefaultDirectory());
+    std::ofstream csv(outDir + L"\\rife_bench.csv");
+    csv << "w,h,runs,total_ms,run_ms,min_run_ms\n";
+    printf("[RIFE 속도] 입력 크기별 신경망 시간 (ms)\n%-10s %8s %8s %8s\n", "크기", "전체", "실행", "최소");
+    const int kRuns = 30;
+    for (int h : { 128, 192, 256, 384, 576 }) {
+        const int w = std::max(64, (int)std::lround(h * 16.0 / 9.0 / 64.0) * 64);
+        engine.SetInputSize(w, h);
+        int activeW = 0, activeH = 0;
+        while (engine.GetState() != RifeEngine::STATE_FAILED && !(engine.ActiveSize(activeW, activeH) && activeW == w && activeH == h)) Sleep(10);
+        if (engine.GetState() != RifeEngine::STATE_READY) {
+            printf("RIFE를 쓸 수 없습니다: %s\n", engine.GetError().c_str());
+            return 1;
+        }
+        // 무늬를 조금씩 옮긴 두 장. 내용은 시간에 거의 영향이 없다.
+        std::vector<float> a((size_t)w * h * 3), b(a.size());
+        for (int c = 0; c < 3; c++)
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    const size_t i = ((size_t)c * h + y) * w + x;
+                    a[i] = 0.5f + 0.5f * std::sin(x * 0.11f + y * 0.07f + c);
+                    b[i] = 0.5f + 0.5f * std::sin((x - 3) * 0.11f + y * 0.07f + c);
+                }
+        double total = 0, run = 0, minRun = 1e9;
+        for (int i = 0; i < kRuns; i++) {
+            RifeEngine::Result r;
+            if (!engine.RunBlocking(a, b, w, h, r)) {
+                printf("RIFE 실행 실패: %s\n", engine.GetError().c_str());
+                return 1;
+            }
+            engine.Recycle(std::move(r.planes));
+            if (i < 3) continue;  // 처음 몇 번은 버린다
+            total += r.ms;
+            run += r.runMs;
+            minRun = std::min(minRun, r.runMs);
+        }
+        const double k = 1.0 / (kRuns - 3);
+        printf("%4dx%-5d %8.2f %8.2f %8.2f\n", w, h, total * k, run * k, minRun);
+        csv << w << "," << h << "," << kRuns - 3 << "," << total * k << "," << run * k << "," << minRun << "\n";
+    }
     return 0;
 }

@@ -1,6 +1,7 @@
 #include "rife.h"
 
 #include <windows.h>
+#include <dxgi1_6.h>
 
 #include <chrono>
 #include <cstring>
@@ -21,6 +22,33 @@ bool Failed(OrtStatus* status, std::string& error)
     error = g_ort->GetErrorMessage(status);
     g_ort->ReleaseStatus(status);
     return true;
+}
+
+// DirectML의 장치 번호는 DXGI 어댑터 순서다. 0번은 보통 화면이 연결된 GPU라서,
+// 내장 GPU와 외장 GPU가 함께 있는 노트북에서는 느린 내장 GPU가 될 수 있다. 성능 우선 GPU의 번호를 찾는다.
+int HighPerformanceAdapter()
+{
+    IDXGIFactory6* factory6 = nullptr;
+    if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory6)))) return 0;
+    int index = 0;
+    IDXGIAdapter1* best = nullptr;
+    if (SUCCEEDED(factory6->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&best)))) {
+        DXGI_ADAPTER_DESC1 want = {};
+        best->GetDesc1(&want);
+        best->Release();
+        IDXGIAdapter1* adapter = nullptr;
+        for (UINT i = 0; factory6->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
+            DXGI_ADAPTER_DESC1 desc = {};
+            adapter->GetDesc1(&desc);
+            adapter->Release();
+            if (desc.AdapterLuid.LowPart == want.AdapterLuid.LowPart && desc.AdapterLuid.HighPart == want.AdapterLuid.HighPart) {
+                index = (int)i;
+                break;
+            }
+        }
+    }
+    factory6->Release();
+    return index;
 }
 
 }  // namespace
@@ -87,9 +115,16 @@ void RifeEngine::SetInputSize(int w, int h)
         if (m_wantW == w && m_wantH == h) return;
         m_wantW = w;
         m_wantH = h;
-        if (m_state != STATE_FAILED) m_state = STATE_LOADING;
     }
     m_wake.notify_all();
+}
+
+bool RifeEngine::ActiveSize(int& w, int& h)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    w = m_sessionW;
+    h = m_sessionH;
+    return m_session != nullptr;
 }
 
 void RifeEngine::Submit(long long seq, std::vector<float> first, std::vector<float> second, int w, int h)
@@ -115,14 +150,20 @@ bool RifeEngine::TakeResult(Result& out)
     return true;
 }
 
+void RifeEngine::Recycle(std::vector<float>&& planes)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_spare = std::move(planes);
+}
+
 bool RifeEngine::RunBlocking(std::vector<float> first, std::vector<float> second, int w, int h, Result& out)
 {
     static long long nextSeq = 1LL << 40;
     const long long seq = nextSeq++;
     Submit(seq, std::move(first), std::move(second), w, h);
     std::unique_lock<std::mutex> lock(m_mutex);
-    m_done.wait(lock, [&] { return m_state == STATE_FAILED || (m_hasResult && m_result.seq == seq); });
-    if (m_state == STATE_FAILED) return false;
+    m_done.wait(lock, [&] { return m_state == STATE_FAILED || m_droppedSeq == seq || (m_hasResult && m_result.seq == seq); });
+    if (m_state == STATE_FAILED || m_droppedSeq == seq) return false;
     out = std::move(m_result);
     m_hasResult = false;
     return true;
@@ -167,21 +208,16 @@ bool RifeEngine::Load()
     return true;
 }
 
-bool RifeEngine::PrepareSession(int w, int h)
+void* RifeEngine::BuildSession(int w, int h)
 {
     std::string error;
-    auto fail = [&]() {
+    auto fail = [&]() -> void* {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_error = error;
         m_state = STATE_FAILED;
         m_done.notify_all();
-        return false;
+        return nullptr;
     };
-
-    if (m_session) {
-        g_ort->ReleaseSession(static_cast<OrtSession*>(m_session));
-        m_session = nullptr;
-    }
 
     OrtSessionOptions* options = nullptr;
     if (Failed(g_ort->CreateSessionOptions(&options), error)) return fail();
@@ -189,14 +225,22 @@ bool RifeEngine::PrepareSession(int w, int h)
     auto appendDml = reinterpret_cast<AppendDmlFn>(m_appendDml);
     bool bad = Failed(g_ort->DisableMemPattern(options), error) ||
                Failed(g_ort->SetSessionExecutionMode(options, ORT_SEQUENTIAL), error) ||
-               Failed(appendDml(options, 0), error);
+               Failed(appendDml(options, HighPerformanceAdapter()), error);
+    // 모델은 크기가 바뀌어도 되게 내보냈지만, 세션은 크기마다 새로 만드므로 크기를 고정해 준다.
+    // 크기가 정해지면 크기 계산이 미리 끝나고 DirectML이 신경망 전체를 한 덩어리로 컴파일한다.
+    if (!bad)
+        bad = Failed(g_ort->AddFreeDimensionOverrideByName(options, "64*h", h), error) ||
+              Failed(g_ort->AddFreeDimensionOverrideByName(options, "64*w", w), error);
+    // 연산별 시간을 보려면 환경 변수 OPENSCALER_RIFE_PROFILE에 파일 이름 앞부분을 준다 (세션을 닫을 때 JSON으로 저장).
+    wchar_t profile[MAX_PATH];
+    if (!bad && GetEnvironmentVariableW(L"OPENSCALER_RIFE_PROFILE", profile, MAX_PATH) > 0)
+        bad = Failed(g_ort->EnableProfiling(options, profile), error);
     OrtSession* session = nullptr;
     if (!bad) {
         bad = Failed(g_ort->CreateSession(static_cast<OrtEnv*>(m_env), (m_directory + L"\\rife.onnx").c_str(), options, &session), error);
     }
     g_ort->ReleaseSessionOptions(options);
     if (bad) return fail();
-    m_session = session;
 
     // 첫 실행 때 셰이더를 컴파일해 몇 초 걸리므로 시작 전에 한 번 돌려 둔다.
     Request warm;
@@ -205,18 +249,14 @@ bool RifeEngine::PrepareSession(int w, int h)
     warm.first.assign((size_t)w * h * 3, 0.5f);
     warm.second = warm.first;
     Result ignored;
-    if (!Infer(warm, ignored)) return false;
-
-    m_sessionW = w;
-    m_sessionH = h;
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_wantW == w && m_wantH == h) m_state = STATE_READY;
-    m_averageMs = 0;
-    m_resultCount = 0;
-    return true;
+    if (!Infer(session, warm, ignored)) {
+        g_ort->ReleaseSession(session);
+        return nullptr;
+    }
+    return session;
 }
 
-bool RifeEngine::Infer(Request& request, Result& out)
+bool RifeEngine::Infer(void* session, Request& request, Result& out)
 {
     auto start = std::chrono::steady_clock::now();
     std::string error;
@@ -229,7 +269,12 @@ bool RifeEngine::Infer(Request& request, Result& out)
     };
 
     const int64_t shape[4] = { 1, 3, request.h, request.w };
-    const size_t count = (size_t)request.w * request.h * 3;
+    const int64_t flowShape[4] = { 1, 4, request.h, request.w };
+    const int64_t maskShape[4] = { 1, 1, request.h, request.w };
+    const size_t pixels = (size_t)request.w * request.h;
+    const size_t count = pixels * 3;
+    // 출력을 미리 만든 버퍼에 바로 받는다. 움직임 4장 뒤에 마스크 1장이 이어진다.
+    out.planes.resize(pixels * 5);
     auto memory = static_cast<OrtMemoryInfo*>(m_memory);
     OrtValue* inputs[2] = {};
     OrtValue* outputs[2] = {};
@@ -240,25 +285,17 @@ bool RifeEngine::Infer(Request& request, Result& out)
                                                             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &inputs[0]), error) ||
                Failed(g_ort->CreateTensorWithDataAsOrtValue(memory, request.second.data(), count * sizeof(float), shape, 4,
                                                             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &inputs[1]), error) ||
-               Failed(g_ort->Run(static_cast<OrtSession*>(m_session), nullptr, inputNames, inputs, 2, outputNames, 2, outputs), error);
+               Failed(g_ort->CreateTensorWithDataAsOrtValue(memory, out.planes.data(), pixels * 4 * sizeof(float), flowShape, 4,
+                                                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &outputs[0]), error) ||
+               Failed(g_ort->CreateTensorWithDataAsOrtValue(memory, out.planes.data() + pixels * 4, pixels * sizeof(float), maskShape, 4,
+                                                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &outputs[1]), error);
+    auto runStart = std::chrono::steady_clock::now();
+    if (!bad) bad = Failed(g_ort->Run(static_cast<OrtSession*>(session), nullptr, inputNames, inputs, 2, outputNames, 2, outputs), error);
+    out.runMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - runStart).count();
 
-    if (!bad) {
-        float* flow = nullptr;
-        float* mask = nullptr;
-        bad = Failed(g_ort->GetTensorMutableData(outputs[0], reinterpret_cast<void**>(&flow)), error) ||
-              Failed(g_ort->GetTensorMutableData(outputs[1], reinterpret_cast<void**>(&mask)), error);
-        if (!bad) {
-            // 평면 형식을 텍스처에 바로 올릴 수 있는 형식으로 바꾼다.
-            const size_t pixels = (size_t)request.w * request.h;
-            out.seq = request.seq;
-            out.w = request.w;
-            out.h = request.h;
-            out.flow.resize(pixels * 4);
-            for (size_t i = 0; i < pixels; i++)
-                for (size_t c = 0; c < 4; c++) out.flow[i * 4 + c] = flow[c * pixels + i];
-            out.mask.assign(mask, mask + pixels);
-        }
-    }
+    out.seq = request.seq;
+    out.w = request.w;
+    out.h = request.h;
     for (OrtValue* v : inputs) if (v) g_ort->ReleaseValue(v);
     for (OrtValue* v : outputs) if (v) g_ort->ReleaseValue(v);
     if (bad) return fail();
@@ -274,28 +311,69 @@ void RifeEngine::Worker()
 
     while (true) {
         Request request;
-        int wantW = 0, wantH = 0;
+        int buildW = 0, buildH = 0;
+        void* retired = nullptr;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
-            m_wake.wait(lock, [&] { return m_quit || m_request.valid || (m_wantW && (m_wantW != m_sessionW || m_wantH != m_sessionH)); });
-            if (m_quit) break;
-            wantW = m_wantW;
-            wantH = m_wantH;
-            if (wantW == m_sessionW && wantH == m_sessionH) {
-                request = std::move(m_request);
+            auto needBuild = [&] { return m_wantW && !m_building && (m_wantW != m_sessionW || m_wantH != m_sessionH); };
+            m_wake.wait(lock, [&] { return m_quit || m_request.valid || m_newSession || m_state == STATE_FAILED || needBuild(); });
+            if (m_quit || m_state == STATE_FAILED) break;
+            if (m_newSession) {
+                // 새 세션으로 바꿔 낀다. 시간과 결과 수는 크기마다 새로 센다.
+                retired = m_session;
+                m_session = m_newSession;
+                m_sessionW = m_newW;
+                m_sessionH = m_newH;
+                m_newSession = nullptr;
+                m_building = false;
+                m_state = STATE_READY;
+                m_averageMs = 0;
+                m_resultCount = 0;
+            }
+            if (needBuild()) {
+                m_building = true;
+                buildW = m_wantW;
+                buildH = m_wantH;
+            }
+            if (m_request.valid) {
+                if (m_request.w == m_sessionW && m_request.h == m_sessionH && m_session) {
+                    request = std::move(m_request);
+                } else {
+                    m_droppedSeq = m_request.seq;  // 크기가 맞지 않는 요청은 버린다
+                    m_done.notify_all();
+                }
                 m_request = Request();
-            } else {
-                m_request = Request();  // 크기가 맞지 않는 요청은 버린다
             }
         }
-        if (wantW != m_sessionW || wantH != m_sessionH) {
-            if (!PrepareSession(wantW, wantH)) break;
+        if (retired) {
+            if (m_builder.joinable()) m_builder.join();
+            g_ort->ReleaseSession(static_cast<OrtSession*>(retired));
             m_done.notify_all();
-            continue;
         }
-        if (!request.valid || request.w != m_sessionW || request.h != m_sessionH) continue;
+        if (buildW) {
+            if (m_builder.joinable()) m_builder.join();
+            m_builder = std::thread([this, buildW, buildH] {
+                void* session = BuildSession(buildW, buildH);
+                if (!session) {
+                    m_wake.notify_all();  // 실패 상태를 작업 스레드에 알린다
+                    return;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_newSession = session;
+                    m_newW = buildW;
+                    m_newH = buildH;
+                }
+                m_wake.notify_all();
+            });
+        }
+        if (!request.valid) continue;
         Result result;
-        if (!Infer(request, result)) break;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            result.planes = std::move(m_spare);
+        }
+        if (!Infer(m_session, request, result)) break;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_averageMs = m_averageMs <= 0 ? result.ms : m_averageMs * 0.9 + result.ms * 0.1;
@@ -306,6 +384,8 @@ void RifeEngine::Worker()
         m_done.notify_all();
     }
 
+    if (m_builder.joinable()) m_builder.join();
+    if (m_newSession) g_ort->ReleaseSession(static_cast<OrtSession*>(m_newSession));
     if (m_memory) g_ort->ReleaseMemoryInfo(static_cast<OrtMemoryInfo*>(m_memory));
     if (m_session) g_ort->ReleaseSession(static_cast<OrtSession*>(m_session));
     if (m_env) g_ort->ReleaseEnv(static_cast<OrtEnv*>(m_env));

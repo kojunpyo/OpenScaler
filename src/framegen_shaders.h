@@ -461,8 +461,18 @@ void CSResize(uint3 id : SV_DispatchThreadID)
     colorOut[id.xy] = float4(composeA.SampleLevel(linSamp, uv, 0).rgb, 1);
 }
 
-Texture2D<float4> rifeFlow : register(t2);
-Texture2D<float>  rifeMask : register(t3);
+Texture2D<float> rifePlanes : register(t2);  // 평면 5장을 세로로 이은 것: 움직임 x0, y0, x1, y1, 마스크
+
+float4 RifeFlowAt(int2 c)
+{
+    return float4(rifePlanes.Load(int3(c.x, c.y, 0)), rifePlanes.Load(int3(c.x, c.y + lvlSize.y, 0)),
+                  rifePlanes.Load(int3(c.x, c.y + lvlSize.y * 2, 0)), rifePlanes.Load(int3(c.x, c.y + lvlSize.y * 3, 0)));
+}
+
+float RifeMaskAt(int2 c)
+{
+    return rifePlanes.Load(int3(c.x, c.y + lvlSize.y * 4, 0));
+}
 
 [numthreads(8, 8, 1)]
 void CSRifeCompose(uint3 id : SV_DispatchThreadID)
@@ -475,10 +485,8 @@ void CSRifeCompose(uint3 id : SV_DispatchThreadID)
     float2 f = saturate(q - float2(b0));
 
     // 부동소수 텍스처는 선형 필터를 보장하지 않으므로 직접 섞는다.
-    float4 flow = lerp(lerp(rifeFlow.Load(int3(b0.x, b0.y, 0)), rifeFlow.Load(int3(b1.x, b0.y, 0)), f.x),
-                       lerp(rifeFlow.Load(int3(b0.x, b1.y, 0)), rifeFlow.Load(int3(b1.x, b1.y, 0)), f.x), f.y);
-    float mask = lerp(lerp(rifeMask.Load(int3(b0.x, b0.y, 0)), rifeMask.Load(int3(b1.x, b0.y, 0)), f.x),
-                      lerp(rifeMask.Load(int3(b0.x, b1.y, 0)), rifeMask.Load(int3(b1.x, b1.y, 0)), f.x), f.y);
+    float4 flow = lerp(lerp(RifeFlowAt(b0), RifeFlowAt(int2(b1.x, b0.y)), f.x), lerp(RifeFlowAt(int2(b0.x, b1.y)), RifeFlowAt(b1), f.x), f.y);
+    float mask = lerp(lerp(RifeMaskAt(b0), RifeMaskAt(int2(b1.x, b0.y)), f.x), lerp(RifeMaskAt(int2(b0.x, b1.y)), RifeMaskAt(b1), f.x), f.y);
 
     float2 scale = float2(srcSize) / float2(lvlSize);
     float3 ca = SampleA(p + flow.xy * scale * 2.0 * t);

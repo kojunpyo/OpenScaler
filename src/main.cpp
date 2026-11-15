@@ -1260,9 +1260,9 @@ static void RenderFrame()
                 displaySrv = generated;
                 if (auto held = g_frameGen->HeldFrame()) compareSrv = held;
             }
-            if (g_fgLog) fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f\n", now, g_frameGen->Stats().displayT, g_frameGen->Stats().realFrames,
+            if (g_fgLog) fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f,%d\n", now, g_frameGen->Stats().displayT, g_frameGen->Stats().realFrames,
                                  g_frameGen->Stats().duplicates, g_frameGen->Stats().rifeShown, g_frameGen->Stats().rifeMissed, g_frameGen->Stats().rifeMs,
-                                 g_frameGen->Stats().contentTime);
+                                 g_frameGen->Stats().contentTime, g_frameGen->Stats().rifeHeight);
         } else if (s->fgWasOn && !g_settings.frameGen) {
             g_frameGen->SetProfile(nullptr);
             g_frameGen->Reset();
@@ -1559,7 +1559,7 @@ int wmain(int argc, wchar_t** argv)
     // 명령줄 옵션: --target "창 제목 일부" --duration 초 --mode 0~4 --sharp 0~1 --integer
     //             --no-gui (설정 창 없이 실행) --console (로그를 보여 줄 콘솔 창 열기)
     std::wstring targetTitle;
-    std::wstring fgSelfTestDir, fgGapTestDump, fgGapTestOut, fgGapTestProfile;
+    std::wstring fgSelfTestDir, rifeBenchDir, fgGapTestDump, fgGapTestOut, fgGapTestProfile;
     double duration = 0;
     double slowMoAuto = -1;
     bool useGui = true;
@@ -1582,6 +1582,7 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--compare") g_settings.compare = true;
         else if (a == L"--cursor-speed") g_settings.adjustCursorSpeed = true;
         else if (a == L"--fg-selftest" && i + 1 < argc) fgSelfTestDir = argv[++i];
+        else if (a == L"--rife-bench" && i + 1 < argc) rifeBenchDir = argv[++i];
         else if (a == L"--fg-gaptest" && i + 2 < argc) {
             fgGapTestDump = argv[++i];
             fgGapTestOut = argv[++i];
@@ -1619,6 +1620,11 @@ int wmain(int argc, wchar_t** argv)
         InitD3D();
         if (!fgSelfTestDir.empty()) {
             exitCode = RunFrameGenSelfTest(g_device.get(), g_ctx.get(), fgSelfTestDir);
+            MagUninitialize();
+            return exitCode;
+        }
+        if (!rifeBenchDir.empty()) {
+            exitCode = RunRifeBench(rifeBenchDir);
             MagUninitialize();
             return exitCode;
         }

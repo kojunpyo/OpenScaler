@@ -13,5 +13,8 @@ int RunFrameGenSelfTest(ID3D11Device* device, ID3D11DeviceContext* context, cons
 int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& dumpDir, const std::wstring& outDir,
                        const std::wstring& profilePath);
 
+// RIFE 신경망 시간만 입력 크기별로 잰다. 화면과 캡처를 쓰지 않는다.
+int RunRifeBench(const std::wstring& outDir);
+
 // RGBA 영상을 BMP로 저장한다 (테스트용)
 void SaveFrameBmp(const std::wstring& path, const std::vector<uint32_t>& rgba, int w, int h);

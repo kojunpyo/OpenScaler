@@ -29,3 +29,6 @@ shown = rows[-1][4] - rows[0][4]
 missed = rows[-1][5] - rows[0][5]
 if shown + missed > 0:
     print(f"RIFE: 합성 {shown}번, 블록 매칭으로 대신 {missed}번 ({100 * shown / (shown + missed):.0f}%가 RIFE), 신경망 평균 {rows[-1][6]:.1f} ms")
+    heights = [line.strip().split(',')[8] for line in open(sys.argv[1]) if line.count(',') >= 8 and not line.startswith('slowmo')]
+    if heights:
+        print(f"RIFE 입력 높이: 처음 {heights[0]}, 마지막 {heights[-1]}")

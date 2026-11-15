@@ -34,7 +34,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 - `src/gui.cpp`: 설정 창 (Dear ImGui 1.91.5)
 - `src/shaders.h`: 실행 중에 컴파일하는 HLSL (업스케일, 샤프닝, 커서)
 - `src/framegen.*`, `src/framegen_shaders.h`: 프레임 생성 (움직임 추정, 합성, 표시 시점, 채점)
-- `src/framegen_test.*`: 프레임 생성 자체 테스트 (`--fg-selftest 폴더`, 화면과 마우스를 쓰지 않음)
+- `src/framegen_test.*`: 프레임 생성 자체 테스트 (`--fg-selftest 폴더`, 화면과 마우스를 쓰지 않음). RIFE 속도는 `--rife-bench 폴더`
 - `src/game_profile.*`: 게임별 프로필 (설정 자동 조정, 화면 지도, `profiles/*.json`)
 - `src/rife.*`: RIFE 실행 (실행 파일 옆 `rife` 폴더의 ONNX Runtime과 모델을 실행 중에 불러옴). `tools/rife_export.py`: 모델 변환
 - `src/fsr.hlsl`, `src/fsr_constants.*`: FSR 1.0. fxc로 빌드 때 컴파일
@@ -51,7 +51,8 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 - 프레임 생성: 블록 매칭, 학습 1, 2단계, RIFE 생성기, 슬로모션 테스트(보간, 외삽) 구현 완료. DJMAX는 이 PC(60Hz)에서 60fps로 캡처되어 실시간 생성이 작동하지 않으므로 슬로모션으로만 확인했다. 체감은 아직 확인하지 못했다.
 - DJMAX 테스트는 게임에 Enter 외의 입력을 보내지 않는다 (게임이 비정상 동작으로 보고 꺼질 수 있다). 사용자가 곡 선택 화면을 준비해 둔다.
 - 긴 간격(보통 간격의 2.5배 초과) 쌍은 칸 8, 낮은 벌점으로 추정한다. 측정은 `--fg-gaptest`로 슬로모션 덤프를 쓴다.
-- 다음 작업: 테스트 기기에서 확인, 실시간 RIFE 속도. 결정, 측정 결과, 다른 기기 체크리스트는 `docs/frame-generation-plan.md`
+- RIFE 세션은 입력 크기를 고정해 만든다 (크기 계산이 미리 끝나 빨라짐). 크기를 바꾸면 새 세션을 뒤에서 만들고 그동안 이전 크기로 돌린다.
+- 다음 작업: 테스트 기기에서 확인 (RIFE 속도는 `--rife-bench`). 결정, 측정 결과, 다른 기기 체크리스트는 `docs/frame-generation-plan.md`
 - 남은 운영 작업: 이슈/PR 템플릿, CONTRIBUTING.md
 
 ## 사용 중인 단축키

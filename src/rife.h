@@ -16,9 +16,11 @@ public:
     struct Result {
         long long seq = 0;
         int w = 0, h = 0;
-        std::vector<float> flow;  // 픽셀마다 4값: 시점 0.5에서 앞 프레임으로 (x, y), 뒤 프레임으로 (x, y)
-        std::vector<float> mask;  // 픽셀마다 앞 프레임의 비중 (0~1)
-        double ms = 0;
+        // 신경망 출력을 평면 5장으로 이어 붙인 그대로 둔다 (w*h*5). 다시 늘어놓지 않고 텍스처에 바로 올린다.
+        // 0~3장: 시점 0.5에서 앞 프레임으로 x, y, 뒤 프레임으로 x, y. 4장: 앞 프레임의 비중 (0~1)
+        std::vector<float> planes;
+        double ms = 0;     // 입력 준비부터 결과 정리까지
+        double runMs = 0;  // 신경망 실행만
     };
 
     explicit RifeEngine(std::wstring directory);
@@ -27,13 +29,17 @@ public:
     State GetState();
     std::string GetError();
 
-    // 입력 크기를 정한다. 같은 세션으로 다른 크기를 돌리면 3배 가까이 느려져(GTX 1060에서 측정)
-    // 크기가 바뀌면 세션을 새로 만들고 한 번 돌려 둔다. 몇 초 걸리며 그동안 상태는 STATE_LOADING이다.
+    // 입력 크기를 정한다. 세션은 크기를 고정해 만들므로(그래야 빠르다) 크기가 바뀌면 새 세션을 만들고 한 번 돌려 둔다.
+    // 몇 초 걸리며, 그동안은 이전 크기의 세션으로 계속 처리한다. 세션이 하나도 없을 때만 STATE_LOADING이다.
     void SetInputSize(int w, int h);
+    // 지금 처리할 수 있는 입력 크기. 이 크기와 다른 요청은 버린다. 세션이 없으면 false
+    bool ActiveSize(int& w, int& h);
 
     // 입력은 0~1 평면 3채널(w*h*3). 처리 중이면 가장 최근 요청만 남긴다.
     void Submit(long long seq, std::vector<float> first, std::vector<float> second, int w, int h);
     bool TakeResult(Result& out);
+    // 다 쓴 결과의 버퍼를 돌려주면 다음 결과에 다시 쓴다 (큰 버퍼를 매번 새로 만들고 0으로 채우지 않도록).
+    void Recycle(std::vector<float>&& planes);
     // 결과가 나올 때까지 기다린다 (자체 테스트용)
     bool RunBlocking(std::vector<float> first, std::vector<float> second, int w, int h, Result& out);
     double AverageMs();
@@ -52,11 +58,16 @@ private:
 
     void Worker();
     bool Load();
-    bool PrepareSession(int w, int h);
-    bool Infer(Request& request, Result& out);
+    void* BuildSession(int w, int h);  // 실패하면 nullptr
+    bool Infer(void* session, Request& request, Result& out);
 
     std::wstring m_directory;
     std::thread m_thread;
+    std::thread m_builder;      // 새 크기의 세션을 뒤에서 만든다
+    bool m_building = false;
+    void* m_newSession = nullptr;  // 다 만든 새 세션. 작업 스레드가 바꿔 낀다
+    int m_newW = 0, m_newH = 0;
+    long long m_droppedSeq = -1;   // 크기가 맞지 않아 버린 마지막 요청
     std::mutex m_mutex;
     std::condition_variable m_wake, m_done;
     bool m_quit = false;
@@ -67,6 +78,7 @@ private:
     int m_sessionW = 0, m_sessionH = 0;
     int m_resultCount = 0;
     Result m_result;
+    std::vector<float> m_spare;
     bool m_hasResult = false;
     double m_averageMs = 0;
 
