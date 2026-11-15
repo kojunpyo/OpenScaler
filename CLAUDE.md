@@ -40,7 +40,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 - `src/fsr.hlsl`, `src/fsr_constants.*`: FSR 1.0. fxc로 빌드 때 컴파일
 - `third_party/`: fsr(MIT), imgui(MIT), galmuri(OFL 1.1), onnxruntime 헤더(MIT)
 - `tools/make_icon.ps1`: 로고와 아이콘 생성
-- `tools/test/`: 수동 테스트 스크립트
+- `tools/test/`: 수동 테스트 스크립트 (`demoform.ps1`: README 시연 화면용 창)
 
 렌더링 순서: 캡처 -> 보이는 클라이언트 영역 복사 -> 프레임 생성(켠 경우) -> Pass 1 업스케일 -> Pass 2 샤프닝 -> 비교 모드 -> 커서 -> Direct2D 상태 표시 -> Present.
 
@@ -57,7 +57,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 
 ## 사용 중인 단축키
 
-Alt+Shift + S(시작/중지), M(모드), I(정수배), Up/Down(샤프닝), C(비교), O(상태 표시), P(커서 속도), F(프레임 보간), T(슬로모션 테스트), Q(종료).
+Alt+Shift + S(시작/중지), M(모드), I(정수배), Up/Down(샤프닝), C(비교), O(상태 표시), P(커서 속도), F(프레임 생성), T(슬로모션 테스트), Q(종료).
 슬로모션 재생 중에만 Space(멈춤), Left/Right(한 장씩)를 등록한다. 이 PC에서 Alt+Shift+R은 다른 프로그램이 이미 쓰고 있어 등록되지 않는다.
 
 ## 설정 창 디자인 (사용자 지정)

@@ -119,7 +119,10 @@ static void LoadSettings()
     g_settings.fgQuality = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"FgQuality", g_settings.fgQuality, file), 0, FG_QUALITY_COUNT - 1);
     g_settings.fgMethod = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"FgMethod", g_settings.fgMethod, file), 0, FG_METHOD_COUNT - 1);
     g_settings.fgGenerator = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"FgGenerator", g_settings.fgGenerator, file), 0, FG_GENERATOR_COUNT - 1);
-    g_settings.fgPreset = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"FgPreset", g_settings.fgPreset, file), 0, FG_PRESET_COUNT - 1);
+    {
+        const int preset = (int)GetPrivateProfileIntW(kSettingsSection, L"FgPreset", g_settings.fgPreset, file);
+        g_settings.fgPreset = preset == FG_PRESET_NO_MAP ? FG_PRESET_NO_MAP : FG_PRESET_AUTO;
+    }
     g_settings.fgLearn = GetPrivateProfileIntW(kSettingsSection, L"FgLearn", g_settings.fgLearn, file) != 0;
     g_settings.slowMoTargetFps = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"SlowMoTargetFps", g_settings.slowMoTargetFps, file), 30, 1000);
     g_settings.slowMoSeconds = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"SlowMoSeconds", g_settings.slowMoSeconds, file), 1, 3);
@@ -964,14 +967,16 @@ static void DrawOsd(ScalingSession* s)
                    s->srcW, s->srcH, s->midW, s->midH, s->outputFps, s->captureFps);
         if (g_settings.frameGen && g_frameGen) {
             const FgStats& fg = g_frameGen->Stats();
-            wchar_t line[128];
+            wchar_t line[160];
+            const wchar_t* method = g_settings.fgMethod == FG_METHOD_EXTRAPOLATE ? L"외삽" : L"보간";
             if (fg.noRoom)
-                swprintf_s(line, L"\n보간 ON  ·  게임이 %.0f fps라 넣을 자리가 없음", fg.realFps);
+                swprintf_s(line, L"\n프레임 생성 ON (%ls)  ·  게임이 %.0f fps라 넣을 자리가 없음", method, fg.realFps);
             else if (fg.rifeState == RifeEngine::STATE_READY)
-                swprintf_s(line, L"\n보간 ON (RIFE %dp)  ·  진짜 %.0f fps  ·  신경망 %.0f ms  ·  합성 %.1f ms", fg.rifeHeight, fg.realFps, fg.rifeMs, fg.synthMs);
+                swprintf_s(line, L"\n프레임 생성 ON (%ls, RIFE %dp)  ·  게임 %.0f fps  ·  신경망 %.0f ms  ·  합성 %.1f ms", method, fg.rifeHeight,
+                           fg.realFps, fg.rifeMs, fg.synthMs);
             else
-                swprintf_s(line, L"\n보간 ON%ls  ·  진짜 %.0f fps  ·  계산 %.1f + %.1f ms",
-                           fg.rifeState == RifeEngine::STATE_LOADING ? L" (RIFE 준비 중)" : fg.rifeState == RifeEngine::STATE_FAILED ? L" (RIFE 실패)" : L"",
+                swprintf_s(line, L"\n프레임 생성 ON (%ls%ls)  ·  게임 %.0f fps  ·  움직임 찾기 %.1f ms  ·  합성 %.1f ms", method,
+                           fg.rifeState == RifeEngine::STATE_LOADING ? L", RIFE 준비 중" : fg.rifeState == RifeEngine::STATE_FAILED ? L", RIFE 실패" : L"",
                            fg.realFps, fg.estimateMs, fg.synthMs);
             wcscat_s(text, line);
         }
@@ -996,11 +1001,11 @@ static void DrawOsd(ScalingSession* s)
             const auto& f = frames[g_slowMo.index];
             const double slowdown = g_settings.slowMoTargetFps * g_slowMo.holdVsyncs / s->refreshHz;
             wchar_t kind[64], generator[32];
-            if (f.generated) swprintf_s(kind, L"생성 (진짜 %d + %.2f)", f.real + 1, f.t);
-            else swprintf_s(kind, L"진짜 %d", f.real + 1);
+            if (f.generated) swprintf_s(kind, L"생성 (게임 프레임 %d + %.2f)", f.real + 1, f.t);
+            else swprintf_s(kind, L"게임 프레임 %d", f.real + 1);
             if (g_frameGen->SlowMoRifeHeight() > 0) swprintf_s(generator, L"RIFE %dp", g_frameGen->SlowMoRifeHeight());
             else swprintf_s(generator, L"블록 매칭");
-            swprintf_s(text, L"슬로모션 %.1f배 느리게  ·  %d fps 가정  ·  %d / %d  ·  %ls  ·  %ls%ls\n"
+            swprintf_s(text, L"슬로모션 %.1f배 느리게  ·  %dHz 가정  ·  %d / %d  ·  %ls  ·  %ls%ls\n"
                              L"Alt+Shift+ Space 멈춤  ·  ←→ 한 장씩  ·  O 글자 끄기  ·  T 끝내기",
                        slowdown, g_settings.slowMoTargetFps, g_slowMo.index + 1, (int)frames.size(), kind, generator, g_slowMo.paused ? L"  ·  멈춤" : L"");
         }
@@ -1010,9 +1015,10 @@ static void DrawOsd(ScalingSession* s)
 
     if (g_settings.compare) {
         wchar_t text[64];
-        const bool interpolated = g_settings.frameGen || playing;
-        swprintf_s(text, L"OpenScaler: %hs%ls", kModeNames[g_settings.mode], interpolated ? L" + 보간" : L"");
-        DrawLabel(s, interpolated ? L"일반 확대 (Bilinear), 보간 끔" : L"일반 확대 (Bilinear)", left + margin, bottom - margin, true);
+        const bool generated = g_settings.frameGen || playing;
+        swprintf_s(text, L"OpenScaler: %hs%ls", kModeNames[g_settings.mode],
+                   !generated ? L"" : g_settings.fgMethod == FG_METHOD_EXTRAPOLATE ? L" + 외삽" : L" + 보간");
+        DrawLabel(s, generated ? L"일반 확대 (Bilinear), 프레임 생성 끔" : L"일반 확대 (Bilinear)", left + margin, bottom - margin, true);
         DrawLabel(s, text, (left + right) / 2 + margin, bottom - margin, true);
     }
 
@@ -1048,7 +1054,7 @@ static void SlowMoStop()
         g_frameGen->SetProfile(nullptr);
         g_frameGen->Reset();
     }
-    if (g_scaling) g_scaling->fgWasOn = false;  // 프레임 보간이 켜져 있으면 처음부터 다시 쌓는다
+    if (g_scaling) g_scaling->fgWasOn = false;  // 프레임 생성이 켜져 있으면 처음부터 다시 쌓는다
 }
 
 static void SlowMoFail(const wchar_t* message)
@@ -1113,7 +1119,7 @@ static FgOptions CurrentFgOptions(const ScalingSession* s)
     o.generator = g_settings.fgGenerator;
     o.visualize = g_settings.fgVisualize;
     o.learn = g_settings.fgLearn;
-    o.useMap = g_settings.fgPreset != FG_PRESET_GENERAL;
+    o.useMap = g_settings.fgPreset != FG_PRESET_NO_MAP;
     o.refreshHz = s->refreshHz;
     return o;
 }
@@ -1230,7 +1236,7 @@ static void RenderFrame()
                     g_slowMo.holdVsyncs = std::max(1, (int)std::ceil(s->refreshHz / g_settings.slowMoTargetFps - 0.01));
                     g_slowMo.state = SLOWMO_PLAYING;
                     SlowMoSetPlaybackKeys(true);
-                    printf("\n[슬로모션] 진짜 %d장으로 %d장을 만들었습니다.\n", g_frameGen->SlowMoRealCount(), (int)g_frameGen->SlowMoFrames().size());
+                    printf("\n[슬로모션] 게임 프레임 %d장으로 %d장을 만들었습니다.\n", g_frameGen->SlowMoRealCount(), (int)g_frameGen->SlowMoFrames().size());
                 }
             } catch (const winrt::hresult_error&) {
                 SlowMoFail(L"프레임을 담을 메모리를 잡지 못했어요.");
@@ -1524,7 +1530,7 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD)
 
 static void PrintHelp()
 {
-    printf("OpenScaler 프로토타입\n"
+    printf("OpenScaler\n"
            "------------------------------------------------------------\n"
            "  Alt+Shift+S     현재 활성 창 스케일링 시작/중지\n"
            "  Alt+Shift+M     업스케일 모드 변경 (Nearest/Bilinear/Bicubic/Lanczos2/FSR 1.0)\n"
@@ -1532,7 +1538,7 @@ static void PrintHelp()
            "  Alt+Shift+C     비교 모드 (왼쪽: 일반 확대, 오른쪽: 현재 모드)\n"
            "  Alt+Shift+O     화면 위 상태 표시 항상 켜기/끄기\n"
            "  Alt+Shift+P     커서 속도 보정 켜기/끄기 (확대 중 마우스 속도를 배율만큼 낮춤)\n"
-           "  Alt+Shift+F     프레임 보간 켜기/끄기\n"
+           "  Alt+Shift+F     프레임 생성 켜기/끄기\n"
            "  Alt+Shift+T     슬로모션 테스트 시작/끝내기 (녹화 -> 프레임 생성 -> 느리게 재생)\n"
            "  Alt+Shift+Up    샤프닝 강하게\n"
            "  Alt+Shift+Down  샤프닝 약하게\n"
