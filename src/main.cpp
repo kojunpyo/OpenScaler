@@ -1000,11 +1000,12 @@ static void DrawOsd(ScalingSession* s)
         if (g_settings.frameGen && g_frameGen) {
             const FgStats& fg = g_frameGen->Stats();
             wchar_t line[160];
-            const wchar_t* method = g_settings.fgMethod == FG_METHOD_EXTRAPOLATE ? L"외삽" : L"보간";
+            static const wchar_t* const kModeLabels[FG_MODE_COUNT] = { L"RIFE", L"블록 매칭", L"외삽" };
+            const wchar_t* method = kModeLabels[FgModeOf(g_settings)];
             if (fg.noRoom)
                 swprintf_s(line, L"\n프레임 생성 ON (%ls)  ·  게임이 %.0f fps라 넣을 자리가 없음", method, fg.realFps);
             else if (fg.rifeState == RifeEngine::STATE_READY)
-                swprintf_s(line, L"\n프레임 생성 ON (%ls, RIFE %dp)  ·  게임 %.0f fps  ·  신경망 %.0f ms  ·  합성 %.1f ms", method, fg.rifeHeight,
+                swprintf_s(line, L"\n프레임 생성 ON (RIFE %dp)  ·  게임 %.0f fps  ·  신경망 %.0f ms  ·  합성 %.1f ms", fg.rifeHeight,
                            fg.realFps, fg.rifeMs, fg.synthMs);
             else
                 swprintf_s(line, L"\n프레임 생성 ON (%ls%ls)  ·  게임 %.0f fps  ·  움직임 찾기 %.1f ms  ·  합성 %.1f ms", method,
@@ -1049,7 +1050,7 @@ static void DrawOsd(ScalingSession* s)
         wchar_t text[64];
         const bool generated = g_settings.frameGen || playing;
         swprintf_s(text, L"OpenScaler: %hs%ls", kModeNames[g_settings.mode],
-                   !generated ? L"" : g_settings.fgMethod == FG_METHOD_EXTRAPOLATE ? L" + 외삽" : L" + 보간");
+                   !generated ? L"" : FgModeOf(g_settings) == FG_MODE_RIFE ? L" + RIFE" : FgModeOf(g_settings) == FG_MODE_BLOCK ? L" + 블록 매칭" : L" + 외삽");
         DrawLabel(s, generated ? L"일반 확대 (Bilinear), 프레임 생성 끔" : L"일반 확대 (Bilinear)", left + margin, bottom - margin, true);
         DrawLabel(s, text, (left + right) / 2 + margin, bottom - margin, true);
     }
@@ -1149,7 +1150,7 @@ static FgOptions CurrentFgOptions(const ScalingSession* s)
     o.quality = g_settings.fgQuality;
     o.method = g_settings.fgMethod;
     o.generator = g_settings.fgGenerator;
-    o.visualize = g_settings.fgVisualize;
+    o.visualize = g_settings.fgVisualize && FgModeOf(g_settings) != FG_MODE_RIFE;  // 설정 창에서도 블록 매칭일 때만 보인다
     o.learn = g_settings.fgLearn;
     o.useMap = g_settings.fgPreset != FG_PRESET_NO_MAP;
     o.refreshHz = s->refreshHz;
@@ -1630,8 +1631,9 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--fg") g_settings.frameGen = true;
         else if (a == L"--fg-mult" && i + 1 < argc) g_settings.fgMultiplier = _wtoi(argv[++i]);
         else if (a == L"--fg-quality" && i + 1 < argc) g_settings.fgQuality = std::clamp(_wtoi(argv[++i]), 0, FG_QUALITY_COUNT - 1);
-        else if (a == L"--fg-extrapolate") g_settings.fgMethod = FG_METHOD_EXTRAPOLATE;
-        else if (a == L"--fg-rife") g_settings.fgGenerator = FG_GENERATOR_RIFE;
+        else if (a == L"--fg-extrapolate") SetFgMode(g_settings, FG_MODE_EXTRAPOLATE);
+        else if (a == L"--fg-rife") SetFgMode(g_settings, FG_MODE_RIFE);
+        else if (a == L"--fg-block") SetFgMode(g_settings, FG_MODE_BLOCK);
         else if (a == L"--fg-visualize") g_settings.fgVisualize = true;
         else if (a == L"--fg-log" && i + 1 < argc) _wfopen_s(&g_fgLog, argv[++i], L"w");
         else if (a == L"--slowmo-auto" && i + 1 < argc) slowMoAuto = _wtof(argv[++i]);

@@ -41,19 +41,20 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 - `src/fsr.hlsl`, `src/fsr_constants.*`: FSR 1.0. fxc로 빌드 때 컴파일
 - `third_party/`: fsr(MIT), imgui(MIT), galmuri(OFL 1.1), onnxruntime 헤더(MIT)
 - `tools/make_icon.ps1`: 로고와 아이콘 생성
-- `tools/test/`: 수동 테스트 스크립트 (`demoform.ps1`: README 시연 화면용 창)
+- `tools/test/`: 수동 테스트 스크립트 (`demoform.ps1`: README 시연 화면용 창, `devicecheck.ps1`: 다른 기기에서 기록 모으기, `fgtiming.py`/`fgquality.py`: README 평가 기준으로 등급 매기기)
 
 렌더링 순서: 캡처 -> 보이는 클라이언트 영역 복사 -> 프레임 생성(켠 경우) -> Pass 1 업스케일 -> Pass 2 샤프닝 -> 비교 모드 -> 커서 -> Direct2D 상태 표시 -> Present.
 
 ## 현재 상태
 
-- 코드 버전 1.0.3 (`main`). 공개 릴리스는 v1.0.3 (2026-11-16, rife 폴더 포함).
+- 코드 버전 1.1.0 (`main`). 공개 릴리스는 v1.1.0 (2026-11-16, rife 폴더와 toolsdevicecheck.ps1 포함, RIFE 기본값).
 - 완료: 창 캡처, 5개 업스케일 모드(기본 FSR 1.0), 샤프닝, 정수배, 비교 모드, 상태 표시, 설정 저장, 커서 좌표 변환, 커서 속도 보정, 지연 감소, 설정 창, 로고와 아이콘, CI와 자동 릴리스
 - 프레임 생성: 블록 매칭, 학습 1, 2단계, RIFE 생성기, 슬로모션 테스트(보간, 외삽) 구현 완료. DJMAX는 이 PC(60Hz)에서 60fps로 캡처되어 실시간 생성이 작동하지 않으므로 슬로모션으로만 확인했다. 체감은 아직 확인하지 못했다.
 - DJMAX 테스트는 게임에 Enter 외의 입력을 보내지 않는다 (게임이 비정상 동작으로 보고 꺼질 수 있다). 사용자가 곡 선택 화면을 준비해 둔다.
 - 긴 간격(보통 간격의 2.5배 초과) 쌍은 칸 8, 낮은 벌점으로 추정한다. 측정은 `--fg-gaptest`로 슬로모션 덤프를 쓴다.
 - RIFE 세션은 입력 크기를 고정해 만든다 (크기 계산이 미리 끝나 빨라짐). 크기를 바꾸면 새 세션을 뒤에서 만들고 그동안 이전 크기로 돌린다.
-- 다음 작업: 테스트 기기에서 확인 (RIFE 속도는 `--rife-bench`). 결정, 측정 결과, 다른 기기 체크리스트는 `docs/frame-generation-plan.md`
+- 설정 창의 프레임 생성 방식은 RIFE(기본값) / 블록 매칭 / 외삽 하나로 고른다 (`FgModeOf`, `SetFgMode`). 설정 파일 키는 FgMethod, FgGenerator 그대로다.
+- 다음 작업: 2026-11-21, 22일 고주사율 기기에서 확인 (`docs/frame-generation-plan.md`의 "다른 기기에서 확인할 것"). 결정, 측정 결과, 다른 기기 체크리스트는 `docs/frame-generation-plan.md`
 - 남은 운영 작업: 이슈/PR 템플릿, CONTRIBUTING.md
 
 ## 사용 중인 단축키

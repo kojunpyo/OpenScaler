@@ -119,8 +119,9 @@ const char* kSharpnessDesc = "확대로 흐려진 윤곽선을 또렷하게 해�
 const char* kIntegerDesc = "2배, 3배처럼 정수 배율로만 키워 픽셀이 고르게 커져요. 픽셀 아트용, 가장자리에 여백이 생길 수 있어요.";
 const char* kFpsFormat = "출력 %.0f fps · 캡처 %.0f fps";
 const char* kFooter = "설정은 OpenScaler.ini에 자동 저장돼요";
-const char* kInterpolateDesc = "보간: 게임 프레임 두 장 사이에 움직임을 맞춘 중간 프레임을 넣어요. 정확하지만 화면이 한 프레임 늦어져요.";
-const char* kExtrapolateDesc = "외삽: 지금까지의 움직임으로 다음 게임 프레임이 오기 전 장면을 미리 만들어요. 늦어지지 않지만 덜 정확해요.";
+const char* kModeRifeDesc = "RIFE: 신경망으로 게임 프레임 사이의 움직임을 찾아 중간 프레임을 넣어요. 가장 깨끗하지만 화면이 한 프레임과 계산 시간만큼 늦어져요.";
+const char* kModeBlockDesc = "블록 매칭: 화면을 작은 칸으로 나눠 움직임을 찾아 중간 프레임을 넣어요. 가볍지만 빠른 움직임에서 깨질 수 있어요.";
+const char* kModeExtrapolateDesc = "외삽: 지금까지의 움직임으로 다음 게임 프레임이 오기 전 장면을 미리 만들어요. 늦어지지 않지만 덜 정확해요.";
 const char* kFgStatusFormat = "게임 %.0f fps · 움직임 찾기 %.1f ms · 합성 %.1f ms";
 const char* kFgNoRoomFormat = "게임이 %.0f fps라 넣을 자리가 없어요";
 const char* kFgRifeFormat = "게임 %.0f fps · 신경망 %.0f ms · 합성 %.1f ms";
@@ -139,7 +140,7 @@ const char* kSlowMoWaiting = "곧 녹화해요. 게임 창을 눌러 주세요";
 const char* kSlowMoRecording = "녹화 중이에요";
 const char* kSlowMoGenerating = "프레임 만드는 중 %d / %d";
 const char* kSlowMoPlaying = "재생 중 %d / %d";
-const char* kSecondaryTexts[] = { kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kInterpolateDesc, kExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
+const char* kSecondaryTexts[] = { kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
                                   kFgRifeFormat, kRifeLoading, kRifeFailed, kRifeMissing,
                                   kSlowMoDesc, kSlowMoIdle, kSlowMoPlan, kSlowMoWaiting, kSlowMoRecording, kSlowMoGenerating, kSlowMoPlaying,
                                   kLearnDesc, kLearnFormat, kGraphLegend, kNoProfiles, kNoHistory,
@@ -823,7 +824,27 @@ void DrawUi()
     // 프레임 생성
     BeginBox("##framegen", "프레임 생성", kGrayPalette);
     if (PixelCheckbox("프레임 생성 켜기", &s.frameGen)) changed = true;
-    Description(s.fgMethod == 1 ? kExtrapolateDesc : kInterpolateDesc);
+    const int fgMode = FgModeOf(s);
+    static const char* const kModeDescs[FG_MODE_COUNT] = { kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc };
+    Description(kModeDescs[fgMode]);
+
+    // 방식: 생성기와 보간/외삽을 하나로 묶었다. 대부분은 RIFE를 그대로 쓰면 된다.
+    static const char* const kFgModeNames[FG_MODE_COUNT] = { "RIFE (추천)", "블록 매칭 (가벼움)", "외삽 (실험, 지연 없음)" };
+    int modeIndex = fgMode;
+    RowLabel("방식");
+    LeaveRoomForHelp();
+    if (ImGui::Combo("##fgmode", &modeIndex, kFgModeNames, IM_ARRAYSIZE(kFgModeNames))) {
+        SetFgMode(s, modeIndex);
+        changed = true;
+    }
+    HelpMarker("RIFE: 가장 깨끗해요. 처음 고르면 준비하는 몇 초 동안과 rife 폴더가 없을 때는 블록 매칭을 써요.\n"
+               "블록 매칭: 그래픽카드가 느려서 RIFE가 버거울 때 고르세요.\n"
+               "외삽: 화면이 늦어지는 것이 싫을 때 고르세요. 일정하게 움직이는 리듬게임 노트용 실험 기능이에요.");
+    if (fgMode == FG_MODE_RIFE) {
+        if (!RifeEngine::FilesExist(RifeEngine::DefaultDirectory())) Description(kRifeMissing);
+        else if (status.fgRifeState == 0) Description(kRifeLoading);
+        else if (status.fgRifeState == 2) Description(kRifeFailed);
+    }
 
     static const char* const kMultiplierNames[] = { "자동 (주사율까지)", "2배", "3배", "4배" };
     int multiplierIndex = s.fgMultiplier >= 2 ? s.fgMultiplier - 1 : 0;
@@ -832,42 +853,23 @@ void DrawUi()
         s.fgMultiplier = multiplierIndex == 0 ? 0 : multiplierIndex + 1;
         changed = true;
     }
-    static const char* const kMethodNames[] = { "보간", "외삽 (실험)" };
-    RowLabel("방식");
-    LeaveRoomForHelp();
-    if (ImGui::Combo("##fgmethod", &s.fgMethod, kMethodNames, IM_ARRAYSIZE(kMethodNames))) changed = true;
-    HelpMarker("보간은 화면이 한 프레임 늦어지는 대신 정확해요.\n외삽은 지연을 늘리지 않고 다음 위치를 예측해요. "
-               "일정하게 움직이는 리듬게임 노트용 실험 기능이에요.");
-
-    // 움직임 찾기: 어떤 엔진으로, 얼마나 정밀하게, 화면 지도를 쓸지
-    ImGui::Dummy(ImVec2(0, 2 * u));
-    ImGui::TextUnformatted("움직임 찾기");
-    static const char* const kGeneratorNames[] = { "블록 매칭", "RIFE (실험)" };
-    RowLabel("엔진");
-    LeaveRoomForHelp();
-    if (ImGui::Combo("##fggenerator", &s.fgGenerator, kGeneratorNames, IM_ARRAYSIZE(kGeneratorNames))) changed = true;
-    HelpMarker("블록 매칭은 화면을 작은 칸으로 나눠 앞뒤 프레임에서 같은 모양을 찾아요.\n"
-               "RIFE는 신경망으로 움직임을 찾아요. 더 정확할 수 있지만 GPU를 더 쓰고 화면이 그만큼 더 늦어져요.\n"
-               "실행 파일 옆에 rife 폴더가 있어야 하고, 없으면 블록 매칭을 써요. 외삽에서는 쓰지 않아요.");
-    if (s.fgGenerator == 1) {
-        if (!RifeEngine::FilesExist(RifeEngine::DefaultDirectory())) Description(kRifeMissing);
-        else if (status.fgRifeState == 0) Description(kRifeLoading);
-        else if (status.fgRifeState == 2) Description(kRifeFailed);
-    }
     static const char* const kQualityNames[] = { "낮음 (빠름)", "기본", "높음 (느림)" };
     RowLabel("정밀도");
     LeaveRoomForHelp();
     if (ImGui::Combo("##fgquality", &s.fgQuality, kQualityNames, IM_ARRAYSIZE(kQualityNames))) changed = true;
     HelpMarker("움직임을 찾는 영상의 해상도예요. 높을수록 작은 물체까지 정확하지만 계산이 늘어요.\n"
                "RIFE가 제때 끝나지 못하면 자동으로 낮춰요.");
-    static const char* const kMapNames[] = { "자동", "끔" };
-    RowLabel("화면 지도");
-    LeaveRoomForHelp();
-    if (ImGui::Combo("##fgmap", &s.fgPreset, kMapNames, IM_ARRAYSIZE(kMapNames))) changed = true;
-    HelpMarker("게임별 학습이 쌓은 화면 지도(자주 움직이는 곳과 방향)를 움직임 찾기에 참고해요.\n"
-               "자동이면 채점에서 더 좋게 나올 때만 써요.");
-    if (PixelCheckbox("움직임 시각화", &s.fgVisualize)) changed = true;
-    HelpMarker("찾아낸 움직임을 색으로 보여 줘요. 방향은 색, 빠르기는 진하기예요.");
+    // 화면 지도와 움직임 시각화는 블록 매칭에만 쓰이므로 그때만 보여 준다.
+    if (fgMode != FG_MODE_RIFE) {
+        static const char* const kMapNames[] = { "자동", "끔" };
+        RowLabel("화면 지도");
+        LeaveRoomForHelp();
+        if (ImGui::Combo("##fgmap", &s.fgPreset, kMapNames, IM_ARRAYSIZE(kMapNames))) changed = true;
+        HelpMarker("게임별 학습이 쌓은 화면 지도(자주 움직이는 곳과 방향)를 움직임 찾기에 참고해요.\n"
+                   "자동이면 채점에서 더 좋게 나올 때만 써요.");
+        if (PixelCheckbox("움직임 시각화", &s.fgVisualize)) changed = true;
+        HelpMarker("찾아낸 움직임을 색으로 보여 줘요. 방향은 색, 빠르기는 진하기예요.");
+    }
     if (status.fgActive) {
         char fgText[160];
         if (status.fgNoRoom) snprintf(fgText, sizeof(fgText), kFgNoRoomFormat, status.fgRealFps);
@@ -897,7 +899,7 @@ void DrawUi()
         s.slowMoSeconds = slowMoSecondIndex + 1;
         changed = true;
     }
-    HelpMarker("방식과 움직임 찾기는 위 프레임 생성 설정을 따라요. 외삽은 블록 매칭으로만 만들어요.\n"
+    HelpMarker("방식과 정밀도는 위 프레임 생성 설정을 따라요.\n"
                "느린 GPU에서도 모든 장면을 만들 수 있지만, 실제 지연과 끊김은 이 테스트로 확인할 수 없어요.");
     {
         char slowMoText[96];

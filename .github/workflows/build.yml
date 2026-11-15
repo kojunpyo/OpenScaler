@@ -75,6 +75,8 @@ jobs:
           New-Item -ItemType Directory dist/OpenScaler | Out-Null
           Copy-Item build/OpenScaler.exe, README.md, LICENSE dist/OpenScaler/
           Copy-Item rife dist/OpenScaler/rife -Recurse
+          New-Item -ItemType Directory dist/OpenScaler/tools | Out-Null
+          Copy-Item tools/test/devicecheck.ps1 dist/OpenScaler/tools/
           Copy-Item third_party/fsr/license.txt dist/OpenScaler/LICENSE-AMD-FSR.txt
           Copy-Item third_party/imgui/LICENSE.txt dist/OpenScaler/LICENSE-ImGui.txt
           Copy-Item third_party/galmuri/OFL.md dist/OpenScaler/LICENSE-Galmuri-OFL.md
