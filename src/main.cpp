@@ -1559,7 +1559,7 @@ int wmain(int argc, wchar_t** argv)
     // 명령줄 옵션: --target "창 제목 일부" --duration 초 --mode 0~4 --sharp 0~1 --integer
     //             --no-gui (설정 창 없이 실행) --console (로그를 보여 줄 콘솔 창 열기)
     std::wstring targetTitle;
-    std::wstring fgSelfTestDir, fgGapTestDump, fgGapTestOut;
+    std::wstring fgSelfTestDir, fgGapTestDump, fgGapTestOut, fgGapTestProfile;
     double duration = 0;
     double slowMoAuto = -1;
     bool useGui = true;
@@ -1585,6 +1585,8 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--fg-gaptest" && i + 2 < argc) {
             fgGapTestDump = argv[++i];
             fgGapTestOut = argv[++i];
+            // 세 번째 값이 .json이면 비교할 게임 프로필이다.
+            if (i + 1 < argc && std::wstring(argv[i + 1]).ends_with(L".json")) fgGapTestProfile = argv[++i];
         }
         else if (a == L"--fg") g_settings.frameGen = true;
         else if (a == L"--fg-mult" && i + 1 < argc) g_settings.fgMultiplier = _wtoi(argv[++i]);
@@ -1621,7 +1623,7 @@ int wmain(int argc, wchar_t** argv)
             return exitCode;
         }
         if (!fgGapTestDump.empty()) {
-            exitCode = RunFrameGenGapTest(g_device.get(), g_ctx.get(), fgGapTestDump, fgGapTestOut);
+            exitCode = RunFrameGenGapTest(g_device.get(), g_ctx.get(), fgGapTestDump, fgGapTestOut, fgGapTestProfile);
             MagUninitialize();
             return exitCode;
         }

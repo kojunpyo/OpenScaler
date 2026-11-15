@@ -465,7 +465,8 @@ bool LoadBmp(const std::wstring& path, std::vector<uint32_t>& rgba, int& w, int&
 
 }  // namespace
 
-int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& dumpDir, const std::wstring& outDir)
+int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& dumpDir, const std::wstring& outDir,
+                       const std::wstring& profilePath)
 {
     // 슬로모션 덤프의 진짜 프레임만 쓴다. 이웃한 진짜 프레임은 60fps 캡처의 1칸 간격이다.
     std::vector<std::vector<uint32_t>> frames;
@@ -549,5 +550,102 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
         csv << c.gap << "," << t << "," << n << "," << hold * k << "," << blend * k << "," << block * k << "," << blockLong * k << ","
             << rife * rk << "\n";
     }
+    // 학습 재현: 앞 절반의 프레임으로 실제 프로그램과 같은 순서로 학습하고, 보지 않은 뒤 절반에서 기본값과 비교한다.
+    // 다른 화면이 섞인 경우: 게임 프레임과 계산으로 만든 장면을 24회씩 번갈아 채점한다 (메뉴, 결과 화면 대신).
+    NoiseTexture noise;
+    auto scenes = MakeScenes(noise);
+    std::ofstream learnCsv(outDir + L"\\fg_gaptest_learning.csv");
+    learnCsv << "mixed_with,default_db,learned_db,adopted,cell,radius,smooth,tol,map\n";
+    printf("\n[학습 재현] 앞 절반으로 학습, 보지 않은 뒤 절반의 2칸 비교 (dB)\n%-12s %8s %8s %6s %s\n", "섞은 장면", "기본", "학습", "채택", "학습된 값");
+    for (int mix = -1; mix < (int)scenes.size(); mix++) {
+        GameProfile fresh;
+        fg.SetProfile(&fresh);
+        const int half = (int)frames.size() / 2;
+        const int kIterations = 360;
+        for (int i = 0; i < kIterations; i++) {
+            const int k = (i * 7) % (half - 2);
+            std::vector<uint32_t> s0, s1, s2;
+            if (mix >= 0 && (i / 24) % 2 == 1) {
+                float base = 10.0f + i * 1.3f;
+                s0 = Render(scenes[mix].shade, base, w, h);
+                s1 = Render(scenes[mix].shade, base + 1, w, h);
+                s2 = Render(scenes[mix].shade, base + 2, w, h);
+            }
+            fg.TestLoadFrame(0, s0.empty() ? frames[k].data() : s0.data(), w, h);
+            fg.TestLoadFrame(1, s1.empty() ? frames[k + 1].data() : s1.data(), w, h);
+            fg.TestLoadFrame(2, s2.empty() ? frames[k + 2].data() : s2.data(), w, h);
+            if (i % 4 == 0) {
+                fg.TestSynthPsnr(0, 1, 2, 0.5f, fresh.params, false, kStep);
+                fg.TestAddFlowSample(fresh.params, kStep);
+                fg.TestUpdateMapTexture();
+            }
+            float current = fg.TestSynthPsnr(0, 2, 1, 0.5f, fresh.params, false, kStep * 2).psnr;
+            float candidate = fg.TestSynthPsnr(0, 2, 1, 0.5f, fresh.Candidate(), false, kStep * 2).psnr;
+            fresh.AddEvaluation(current, candidate, fg.TestBlendPsnr(0, 2, 1, 0.5f));
+        }
+        fg.TestUpdateMapTexture();
+        double before = 0, after = 0;
+        int n = 0;
+        for (int k = half; k + 2 < (int)frames.size(); k++) {
+            fg.TestLoadFrame(0, frames[k].data(), w, h);
+            fg.TestLoadFrame(1, frames[k + 1].data(), w, h);
+            fg.TestLoadFrame(2, frames[k + 2].data(), w, h);
+            before += fg.TestSynthPsnr(0, 2, 1, 0.5f, defaults, false, kStep * 2).psnr;
+            after += fg.TestSynthPsnr(0, 2, 1, 0.5f, fresh.params, false, kStep * 2).psnr;
+            n++;
+        }
+        const char* mixName = mix < 0 ? "없음" : scenes[mix].key;
+        printf("%-12s %8.2f %8.2f %6d 칸 %d, 범위 %d, 벌점 %.4f, 허용 %.2f, 지도 %s\n", mixName, before / n, after / n, fresh.adoptedCount,
+               fresh.params.cellPx, fresh.params.coarseRadius, fresh.params.smoothness, fresh.params.blendTol, fresh.params.useMap ? "사용" : "안 씀");
+        fflush(stdout);
+        learnCsv << (mix < 0 ? "none" : scenes[mix].key) << "," << before / n << "," << after / n << "," << fresh.adoptedCount << ","
+                 << fresh.params.cellPx << "," << fresh.params.coarseRadius << "," << fresh.params.smoothness << "," << fresh.params.blendTol << ","
+                 << fresh.params.useMap << "\n";
+        fg.SetProfile(nullptr);
+    }
+
+    if (profilePath.empty()) return 0;
+
+    // 게임별 학습: 같은 프레임으로 기본값과 학습된 설정, 화면 지도의 효과를 따로 잰다.
+    // 실시간과 같이 각 설정에 긴 간격 처리를 덧붙인다.
+    GameProfile profile;
+    if (!profile.Load(profilePath)) {
+        printf("프로필을 읽지 못했습니다\n");
+        return 1;
+    }
+    fg.SetProfile(&profile);
+    fg.TestUpdateMapTexture();
+    const bool mapReady = profile.mapSamples >= 20;
+    FgParams learned = profile.params;
+    learned.useMap = false;
+    printf("\n[학습] 칸 %d, 범위 %d, 벌점 %.4f, 허용 %.2f, 지도 %s (표본 %d, 채점 %d회, 채택 %d회)\n", learned.cellPx, learned.coarseRadius,
+           learned.smoothness, learned.blendTol, profile.params.useMap ? "사용" : "안 씀", profile.mapSamples, profile.evalCount,
+           profile.adoptedCount);
+    printf("%-6s %-6s %9s %10s %12s %12s\n", "간격", "시점", "기본", "기본+지도", "학습(지도X)", "학습+지도");
+    std::ofstream profileCsv(outDir + L"\\fg_gaptest_profile.csv");
+    profileCsv << "gap,t,default_db,default_map_db,learned_db,learned_map_db\n";
+    for (auto& c : cases) {
+        const float t = (float)c.part / c.gap;
+        const bool longGap = FrameGen::IsLongGap(kStep * c.gap, kStep);
+        const FgParams base = longGap ? FrameGen::ForLongGap(defaults) : defaults;
+        const FgParams mine = longGap ? FrameGen::ForLongGap(learned) : learned;
+        double sum[4] = {};
+        int n = 0;
+        for (int k = 0; k + c.gap < (int)frames.size(); k += 2) {
+            fg.TestLoadFrame(1, frames[k].data(), w, h);
+            fg.TestLoadFrame(2, frames[k + c.gap].data(), w, h);
+            fg.TestLoadFrame(3, frames[k + c.part].data(), w, h);
+            sum[0] += fg.TestSynthPsnr(1, 2, 3, t, base, false, kStep * c.gap).psnr;
+            sum[1] += mapReady ? fg.TestSynthPsnr(1, 2, 3, t, base, true, kStep * c.gap).psnr : 0;
+            sum[2] += fg.TestSynthPsnr(1, 2, 3, t, mine, false, kStep * c.gap).psnr;
+            sum[3] += mapReady ? fg.TestSynthPsnr(1, 2, 3, t, mine, true, kStep * c.gap).psnr : 0;
+            n++;
+        }
+        const double k = 1.0 / n;
+        printf("%-6d %-6.2f %9.2f %10.2f %12.2f %12.2f\n", c.gap, t, sum[0] * k, sum[1] * k, sum[2] * k, sum[3] * k);
+        fflush(stdout);
+        profileCsv << c.gap << "," << t << "," << sum[0] * k << "," << sum[1] * k << "," << sum[2] * k << "," << sum[3] * k << "\n";
+    }
+    fg.SetProfile(nullptr);
     return 0;
 }

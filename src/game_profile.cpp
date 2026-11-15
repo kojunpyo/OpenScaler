@@ -24,7 +24,8 @@ const int kAxisCount = 5;
 const int kOptionsPerAxis = 3;
 
 const int kPairsPerTrial = 6;       // 후보 하나를 이 횟수만큼 짝지어 채점한 뒤 결정한다
-const float kAdoptMargin = 0.05f;   // 이만큼(dB) 좋아야 바꾼다. 측정 오차로 값이 흔들리지 않게 한다
+const float kAdoptMargin = 0.05f;   // 평균이 이만큼(dB) 좋아야 바꾼다. 측정 오차로 값이 흔들리지 않게 한다
+const int kDefaultCheckPeriod = 3;  // 기본값과 다른 설정을 쓰는 동안 이 횟수마다 한 번은 기본값을 후보로 시험한다
 const float kCellCostMargin = 0.15f;  // 칸을 더 작게 하면 계산이 늘어나므로 더 큰 향상을 요구한다
 const int kEvalsPerHistoryPoint = 20;
 const size_t kMaxHistory = 240;
@@ -93,6 +94,19 @@ GameProfile::GameProfile() : map(kMapW * kMapH)
 
 void GameProfile::NextCandidate()
 {
+    m_pairs = 0;
+    m_deltas.clear();
+
+    // 다른 화면(메뉴, 결과 화면 등)에서 고른 값이 게임 화면에서는 나쁠 수 있으므로, 기본값으로 돌아갈 기회를 준다.
+    if (++m_trials % kDefaultCheckPeriod == 0) {
+        FgParams defaults;
+        defaults.useMap = params.useMap;  // 지도는 따로 시험한다
+        if (!(defaults == params)) {
+            m_candidate = defaults;
+            return;
+        }
+    }
+
     // 값을 하나씩 돌아가며, 지금과 다른 후보를 하나씩 시험한다.
     for (int tries = 0; tries < kAxisCount * kOptionsPerAxis + 1; tries++) {
         m_step++;
@@ -108,8 +122,6 @@ void GameProfile::NextCandidate()
             break;
         }
     }
-    m_pairs = 0;
-    m_deltaSum = 0;
 }
 
 void GameProfile::AddEvaluation(float currentDb, float candidateDb, float blendDb)
@@ -130,11 +142,27 @@ void GameProfile::AddEvaluation(float currentDb, float candidateDb, float blendD
         m_historyCount = 0;
     }
 
-    m_deltaSum += candidateDb - currentDb;
+    m_deltas.push_back(candidateDb - currentDb);
     if (++m_pairs < kPairsPerTrial) return;
 
-    float margin = m_candidate.cellPx < params.cellPx ? kCellCostMargin : kAdoptMargin;
-    if (m_deltaSum / m_pairs > margin) {
+    // 기본값으로 돌아가는 것은 손해를 막는 쪽이므로 계산량과 상관없이 조금이라도 나으면 돌아간다.
+    // 평균은 한 화면에서의 큰 차이에 끌려가므로 이때는 중앙값과 이긴 비율로 본다.
+    FgParams defaults;
+    defaults.useMap = params.useMap;
+    bool adopt;
+    if (m_candidate == defaults) {
+        std::vector<float> sorted = m_deltas;
+        std::sort(sorted.begin(), sorted.end());
+        const float median = 0.5f * (sorted[(sorted.size() - 1) / 2] + sorted[sorted.size() / 2]);
+        const int wins = (int)std::count_if(m_deltas.begin(), m_deltas.end(), [](float d) { return d > 0; });
+        adopt = median > 0 && wins * 2 >= m_pairs;
+    } else {
+        float sum = 0;
+        for (float d : m_deltas) sum += d;
+        const float margin = m_candidate.cellPx < params.cellPx ? kCellCostMargin : kAdoptMargin;
+        adopt = sum / m_pairs > margin;
+    }
+    if (adopt) {
         params = m_candidate;
         adoptedCount++;
     }

@@ -69,7 +69,8 @@ private:
     int m_axis = 0;       // 지금 바꿔 보는 값 (칸 크기, 탐색 범위, 벌점, 허용치, 화면 지도)
     int m_step = 0;
     int m_pairs = 0;
-    float m_deltaSum = 0;
+    int m_trials = 0;
+    std::vector<float> m_deltas;  // 이번 후보의 채점마다 (후보 - 현재) dB
     float m_sumCurrent = 0, m_sumBlend = 0;
     int m_historyCount = 0;
 };
