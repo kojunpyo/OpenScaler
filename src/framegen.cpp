@@ -24,6 +24,7 @@ const int kWideSearchLevel = 3;      // 1/8 영상에서 넓게 찾는다
 const int kWideSearchRadius = 16;    // 원본 기준 약 128픽셀
 const double kRifeBudget = 0.7;      // 신경망이 프레임 간격의 이 비율을 넘으면 입력 해상도를 낮춘다
 const double kSlowMoWarmup = 0.25;   // 슬로모션 녹화 직후 드라이버가 자리를 잡는 동안의 프레임은 쓰지 않는다 (초)
+const double kLongGap = 2.5;         // 보통 간격의 이 배수를 넘는 쌍은 긴 간격으로 보고 추정 설정을 바꾼다
 const float kDuplicateMse = 2e-7f;   // 1/8 영상의 한 묶음이 이보다 달라야 새 프레임으로 본다 (8비트 반올림 오차 수준)
 
 float PsnrFromMse(float mse)
@@ -428,6 +429,22 @@ FgParams FrameGen::Effective(const FgParams& params, const FgOptions& options) c
     return p;
 }
 
+// 게임이 잠깐 멈칫해 간격이 길어진 쌍은 물체가 많이 움직이고, 사라지거나 새로 나타나는 내용도 많다.
+// 칸을 키워 주변을 더 보고, 벡터 차이 벌점을 낮춰 큰 움직임이 주변 값에 끌려가지 않게 한다.
+// 칸 16은 DJMAX에서 더 좋았지만 움직이는 배경 위의 고정 UI가 5dB 나빠져 8로 정했다 (docs/frame-generation-plan.md).
+// 보통 간격에서는 오히려 나빠 쓰지 않는다.
+bool FrameGen::IsLongGap(double gap, double typical)
+{
+    return typical > 0 && gap > typical * kLongGap;
+}
+
+FgParams FrameGen::ForLongGap(FgParams p)
+{
+    p.cellPx = std::max(p.cellPx, 8);
+    p.smoothness = std::min(p.smoothness, 0.0004f);
+    return p;
+}
+
 void FrameGen::UpdateMapTexture()
 {
     if (!m_profile || m_mapUploaded == m_profile->mapSamples) return;
@@ -470,7 +487,7 @@ void FrameGen::RunEvaluation(const FgOptions& options)
     QueueMse(m_evalOutput.srv.get(), f1.colorSrv.get(), m_evalCurrentGroup, 2);
 }
 
-void FrameGen::QueueFlowSample(const FlowSet& set)
+void FrameGen::QueueFlowSample(const FlowSet& set, double interval)
 {
     Pending p;
     p.staging = GetStaging(set.gridW, set.gridH, DXGI_FORMAT_R32G32B32A32_FLOAT);
@@ -478,7 +495,7 @@ void FrameGen::QueueFlowSample(const FlowSet& set)
     p.kind = 1;
     p.w = set.gridW;
     p.h = set.gridH;
-    p.interval = m_interval;
+    p.interval = interval;
     m_pending.push_back(std::move(p));
 }
 
@@ -630,6 +647,8 @@ void FrameGen::PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, c
     if (m_pairValid) {
         UpdateMapTexture();
         FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        const bool longGap = IsLongGap(gap, m_interval);
+        if (longGap) params = ForLongGap(params);
         FlowSet& set = GetFlowSet(params.cellPx);
         const bool useMap = options.useMap && params.useMap && m_profile && m_profile->mapSamples >= 20;
 
@@ -639,12 +658,14 @@ void FrameGen::PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, c
         }
 
         // 채점이 같은 격자를 썼을 수 있으므로 실시간 움직임은 마지막에 계산한다.
-        Estimate(m_frames[1], m_frames[0], params, set, true, useMap, m_interval);
+        // 긴 간격의 격자에 남은 이전 움직임은 오래전 것이므로 힌트로 쓰지 않는다.
+        Estimate(m_frames[1], m_frames[0], params, set, !longGap, useMap, gap);
         m_liveFlow = &set;
 
-        if (options.learn && m_profile && time - m_lastSampleTime >= kSamplePeriod) {
+        // 화면 지도 표본은 보통 간격의 움직임에서만 뽑는다.
+        if (!longGap && options.learn && m_profile && time - m_lastSampleTime >= kSamplePeriod) {
             m_lastSampleTime = time;
-            QueueFlowSample(set);
+            QueueFlowSample(set, gap);
             if (time - m_lastGenreUpdate >= 5.0) {
                 m_lastGenreUpdate = time;
                 m_profile->UpdateGenre();
@@ -944,6 +965,11 @@ bool FrameGen::SlowMoStartGenerating(int targetFps, int maxFrames)
     }
     m_slowMoTotal = emitted;
     m_slowMoNext = 0;
+
+    std::vector<double> gaps;
+    for (int i = 0; i + 1 < m_slowMoRecorded; i++) gaps.push_back(m_slowMoTimes[i + 1] - m_slowMoTimes[i]);
+    std::nth_element(gaps.begin(), gaps.begin() + gaps.size() / 2, gaps.end());
+    m_slowMoTypical = gaps[gaps.size() / 2];
     m_slowMoFrames.reserve(emitted);
     return emitted > 0;
 }
@@ -990,11 +1016,13 @@ bool FrameGen::SlowMoGenerateStep(const FgOptions& options)
         m_ctx->CopyResource(b.color.get(), first.tex.get());
         BuildPyramid(a);
         BuildPyramid(b);
-        const FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        const bool longGap = IsLongGap(prevGap, m_slowMoTypical);
+        if (longGap) params = ForLongGap(params);
         FlowSet& set = GetFlowSet(params.cellPx);
         UpdateMapTexture();
         const bool useMap = options.useMap && params.useMap && m_profile && m_profile->mapSamples >= 20;
-        Estimate(a, b, params, set, true, useMap, prevGap);
+        Estimate(a, b, params, set, !longGap, useMap, prevGap);
         for (int j = 1; j < count; j++) {
             m_slowMoGenerated.push_back(MakeTarget(m_w, m_h, DXGI_FORMAT_R8G8B8A8_UNORM, true));
             const Target& out = m_slowMoGenerated.back();
@@ -1020,12 +1048,14 @@ bool FrameGen::SlowMoGenerateStep(const FgOptions& options)
                 m_slowMoRifeHeight = (int)m_rifeH;
             }
         }
-        const FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        const bool longGap = IsLongGap(gap, m_slowMoTypical);
+        if (longGap) params = ForLongGap(params);
         FlowSet& set = GetFlowSet(params.cellPx);
         if (!useRife) {
             UpdateMapTexture();
             const bool useMap = options.useMap && params.useMap && m_profile && m_profile->mapSamples >= 20;
-            Estimate(a, b, params, set, true, useMap, gap);
+            Estimate(a, b, params, set, !longGap, useMap, gap);
         }
         for (int j = 1; j < count; j++) {
             m_slowMoGenerated.push_back(MakeTarget(m_w, m_h, DXGI_FORMAT_R8G8B8A8_UNORM, true));

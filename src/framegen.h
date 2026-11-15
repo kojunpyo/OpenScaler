@@ -95,6 +95,10 @@ public:
     std::vector<uint32_t> SlowMoReadFrame(int index);  // RGBA로 읽어 온다 (테스트용)
     void SlowMoClear();
 
+    // 보통 간격(typical)보다 훨씬 긴 쌍인지, 그런 쌍에 쓸 추정 설정
+    static bool IsLongGap(double gap, double typical);
+    static FgParams ForLongGap(FgParams params);
+
     // 자체 테스트용: 슬롯에 영상을 넣고 합성 결과를 정답과 비교한다 -----------------
     struct TestResult {
         float psnr = 0;
@@ -200,7 +204,7 @@ private:
     bool IsDuplicate(const Frame& a, const Frame& b);
 
     void RunEvaluation(const FgOptions& options);
-    void QueueFlowSample(const FlowSet& set);
+    void QueueFlowSample(const FlowSet& set, double interval);
     void PollReadbacks();
     void UpdateMapTexture();
 
@@ -273,6 +277,7 @@ private:
     int m_slowMoRecorded = 0;
     double m_slowMoFirstSeen = -1;          // 녹화를 시작하고 처음 받은 프레임의 시각
     int m_slowMoNext = 0;
+    double m_slowMoTypical = 0;  // 녹화한 프레임 간격의 중앙값 (긴 간격 판단용)
     int m_slowMoTotal = 0;
     int m_slowMoRifeHeight = 0;
     bool m_slowMoRifeLoading = false;

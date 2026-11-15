@@ -230,6 +230,7 @@ OpenScaler.exe --target "창 제목 일부" --mode 3 --sharp 0.5 --integer --dur
 | `--slowmo-seconds` | 슬로모션 테스트의 녹화 길이 (1~3초) |
 | `--slowmo-dump` | 슬로모션 테스트에서 만든 프레임을 지정한 폴더에 BMP로 저장 (테스트용) |
 | `--fg-selftest` | 계산으로 만든 영상으로 프레임 생성 품질을 재서 지정한 폴더에 저장하고 종료 |
+| `--fg-gaptest` | `--slowmo-dump`로 저장한 진짜 프레임을 2~8칸 건너뛰어 생성하고, 건너뛴 진짜 프레임과 비교해 두 번째 폴더에 저장하고 종료 (테스트용) |
 | `--no-gui` | 설정 창 없이 실행 (단축키로만 조작) |
 | `--console` | 로그를 보여 주는 콘솔 창 열기 (디버깅용) |
 | `--duration` | 지정한 초가 지나면 자동 종료 |
@@ -282,7 +283,7 @@ OpenScaler/
 │   ├── shaders.h          # HLSL 셰이더 (업스케일, 샤프닝, 커서) - 실행 중에 컴파일
 │   ├── framegen.*         # 프레임 생성 (움직임 추정, 합성, 표시 시점, 채점)
 │   ├── framegen_shaders.h # 프레임 생성 컴퓨트 셰이더 - 실행 중에 컴파일
-│   ├── framegen_test.*    # 프레임 생성 자체 테스트 (--fg-selftest)
+│   ├── framegen_test.*    # 프레임 생성 자체 테스트 (--fg-selftest, --fg-gaptest)
 │   ├── game_profile.*     # 게임별 프로필 (설정 자동 조정, 화면 지도, 저장)
 │   ├── rife.*             # RIFE 신경망 실행 (ONNX Runtime을 실행 중에 불러옴)
 │   ├── fsr.hlsl           # FSR 1.0 셰이더 진입점 - 빌드할 때 fxc로 컴파일

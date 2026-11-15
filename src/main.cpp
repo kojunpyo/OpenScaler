@@ -1559,7 +1559,7 @@ int wmain(int argc, wchar_t** argv)
     // 명령줄 옵션: --target "창 제목 일부" --duration 초 --mode 0~4 --sharp 0~1 --integer
     //             --no-gui (설정 창 없이 실행) --console (로그를 보여 줄 콘솔 창 열기)
     std::wstring targetTitle;
-    std::wstring fgSelfTestDir;
+    std::wstring fgSelfTestDir, fgGapTestDump, fgGapTestOut;
     double duration = 0;
     double slowMoAuto = -1;
     bool useGui = true;
@@ -1582,6 +1582,10 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--compare") g_settings.compare = true;
         else if (a == L"--cursor-speed") g_settings.adjustCursorSpeed = true;
         else if (a == L"--fg-selftest" && i + 1 < argc) fgSelfTestDir = argv[++i];
+        else if (a == L"--fg-gaptest" && i + 2 < argc) {
+            fgGapTestDump = argv[++i];
+            fgGapTestOut = argv[++i];
+        }
         else if (a == L"--fg") g_settings.frameGen = true;
         else if (a == L"--fg-mult" && i + 1 < argc) g_settings.fgMultiplier = _wtoi(argv[++i]);
         else if (a == L"--fg-quality" && i + 1 < argc) g_settings.fgQuality = std::clamp(_wtoi(argv[++i]), 0, FG_QUALITY_COUNT - 1);
@@ -1613,6 +1617,11 @@ int wmain(int argc, wchar_t** argv)
         InitD3D();
         if (!fgSelfTestDir.empty()) {
             exitCode = RunFrameGenSelfTest(g_device.get(), g_ctx.get(), fgSelfTestDir);
+            MagUninitialize();
+            return exitCode;
+        }
+        if (!fgGapTestDump.empty()) {
+            exitCode = RunFrameGenGapTest(g_device.get(), g_ctx.get(), fgGapTestDump, fgGapTestOut);
             MagUninitialize();
             return exitCode;
         }

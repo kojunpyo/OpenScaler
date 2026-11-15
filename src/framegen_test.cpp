@@ -405,10 +405,149 @@ int RunFrameGenSelfTest(ID3D11Device* device, ID3D11DeviceContext* context, cons
         fg.SetProfile(nullptr);
     }
 
+    // 4. 긴 간격: 게임이 멈칫해 4칸 만에 다음 프레임이 온 경우. 기본 설정과 긴 간격 설정을 비교한다 ------
+    printf("\n[긴 간격] F0, F4로 F2를 만든다 (1280x720, dB)\n%-10s %9s %9s %12s\n", "장면", "블렌딩", "기본", "긴 간격 설정");
+    std::ofstream longCsv(outDir + L"\\fg_longgap.csv");
+    longCsv << "scene,blend_db,default_db,longgap_db\n";
+    const FgParams longGap = FrameGen::ForLongGap(defaults);
+    for (auto& scene : scenes) {
+        double blend = 0, before = 0, after = 0;
+        for (int i = 0; i < kSamples; i++) {
+            float base = 3.0f + i * 6.0f;
+            auto f0 = Render(scene.shade, base, 1280, 720);
+            auto f2 = Render(scene.shade, base + 2, 1280, 720);
+            auto f4 = Render(scene.shade, base + 4, 1280, 720);
+            fg.TestLoadFrame(0, f0.data(), 1280, 720);
+            fg.TestLoadFrame(1, f2.data(), 1280, 720);
+            fg.TestLoadFrame(2, f4.data(), 1280, 720);
+            blend += fg.TestBlendPsnr(0, 2, 1, 0.5f);
+            before += fg.TestSynthPsnr(0, 2, 1, 0.5f, defaults, false, kInterval * 4).psnr;
+            after += fg.TestSynthPsnr(0, 2, 1, 0.5f, longGap, false, kInterval * 4).psnr;
+        }
+        const double k = 1.0 / kSamples;
+        printf("%-10s %9.2f %9.2f %12.2f\n", scene.key, blend * k, before * k, after * k);
+        fflush(stdout);
+        longCsv << scene.key << "," << blend * k << "," << before * k << "," << after * k << "\n";
+    }
+
     return 0;
 }
 
 void SaveFrameBmp(const std::wstring& path, const std::vector<uint32_t>& rgba, int w, int h)
 {
     SaveBmp(path, rgba, w, h);
+}
+
+namespace {
+
+// SaveBmp가 쓴 24비트 BMP를 RGBA로 읽는다.
+bool LoadBmp(const std::wstring& path, std::vector<uint32_t>& rgba, int& w, int& h)
+{
+    std::ifstream file(path, std::ios::binary);
+    BITMAPFILEHEADER fh = {};
+    BITMAPINFOHEADER ih = {};
+    file.read(reinterpret_cast<char*>(&fh), sizeof(fh));
+    file.read(reinterpret_cast<char*>(&ih), sizeof(ih));
+    if (!file || fh.bfType != 0x4D42 || ih.biBitCount != 24 || ih.biHeight <= 0) return false;
+    w = ih.biWidth;
+    h = ih.biHeight;
+    const int rowBytes = (w * 3 + 3) & ~3;
+    file.seekg(fh.bfOffBits);
+    rgba.assign((size_t)w * h, 0);
+    std::vector<uint8_t> row(rowBytes);
+    for (int y = h - 1; y >= 0; y--) {
+        file.read(reinterpret_cast<char*>(row.data()), rowBytes);
+        for (int x = 0; x < w; x++)
+            rgba[(size_t)y * w + x] = 0xFF000000u | row[x * 3 + 2] | (row[x * 3 + 1] << 8) | (row[x * 3] << 16);
+    }
+    return (bool)file;
+}
+
+}  // namespace
+
+int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& dumpDir, const std::wstring& outDir)
+{
+    // 슬로모션 덤프의 진짜 프레임만 쓴다. 이웃한 진짜 프레임은 60fps 캡처의 1칸 간격이다.
+    std::vector<std::vector<uint32_t>> frames;
+    int w = 0, h = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE find = FindFirstFileW((dumpDir + L"\\frame_*_real.bmp").c_str(), &fd);
+    std::vector<std::wstring> names;
+    if (find != INVALID_HANDLE_VALUE) {
+        do names.push_back(fd.cFileName);
+        while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+    std::sort(names.begin(), names.end());
+    for (auto& name : names) {
+        std::vector<uint32_t> rgba;
+        int fw, fh;
+        if (!LoadBmp(dumpDir + L"\\" + name, rgba, fw, fh)) continue;
+        if (!frames.empty() && frames.back() == rgba) continue;  // 녹화 첫 장 반복 등 같은 프레임은 건너뛴다
+        w = fw;
+        h = fh;
+        frames.push_back(std::move(rgba));
+    }
+    if (frames.size() < 12) {
+        printf("진짜 프레임이 부족합니다: %zu장\n", frames.size());
+        return 1;
+    }
+    CreateDirectoryW(outDir.c_str(), nullptr);
+    FrameGen fg(device, context);
+    FgParams defaults;
+    const double kStep = 1.0 / 60.0;
+
+    // 진짜 프레임 k와 k+gap으로 가운데 프레임을 만들고 실제 프레임과 비교한다.
+    // 긴 간격 설정: 실시간처럼 1칸을 보통 간격으로 보고, 그보다 훨씬 긴 쌍에만 넓은 칸과 낮은 벌점을 쓴다.
+    printf("진짜 프레임 %zu장 (%dx%d)\n%-6s %-6s %8s %9s %9s %10s %9s\n", frames.size(), w, h, "간격", "시점", "멈춤", "블렌딩", "블록",
+           "긴 간격 설정", "RIFE");
+    std::ofstream csv(outDir + L"\\fg_gaptest.csv");
+    csv << "gap,t,samples,hold_db,blend_db,block_db,block_longgap_db,rife_db\n";
+    bool rifeOk = true;
+    const struct { int gap, part; } cases[] = { { 2, 1 }, { 3, 1 }, { 4, 2 }, { 4, 1 }, { 6, 3 }, { 8, 4 } };
+    for (auto& c : cases) {
+        const float t = (float)c.part / c.gap;
+        const FgParams longGap = FrameGen::IsLongGap(kStep * c.gap, kStep) ? FrameGen::ForLongGap(defaults) : defaults;
+        double hold = 0, blend = 0, block = 0, blockLong = 0, rife = 0;
+        int n = 0, rifeN = 0;
+        const int sampleAt = (int)frames.size() / 2;
+        for (int k = 0; k + c.gap < (int)frames.size(); k += 2) {
+            fg.TestLoadFrame(1, frames[k].data(), w, h);
+            fg.TestLoadFrame(2, frames[k + c.gap].data(), w, h);
+            fg.TestLoadFrame(3, frames[k + c.part].data(), w, h);
+            const bool save = c.gap == 4 && c.part == 2 && k >= sampleAt && k < sampleAt + 2;
+            std::wstring name = outDir + L"\\gap" + std::to_wstring(c.gap) + L"_";
+
+            hold += fg.TestHoldPsnr(1, 3);
+            blend += fg.TestBlendPsnr(1, 2, 3, t);
+            if (save) SaveBmp(name + L"blend.bmp", fg.TestReadOutput(), w, h);
+            block += fg.TestSynthPsnr(1, 2, 3, t, defaults, false, kStep * c.gap).psnr;
+            if (save) SaveBmp(name + L"block.bmp", fg.TestReadOutput(), w, h);
+            blockLong += fg.TestSynthPsnr(1, 2, 3, t, longGap, false, kStep * c.gap).psnr;
+            if (save) SaveBmp(name + L"block_longgap.bmp", fg.TestReadOutput(), w, h);
+            if (rifeOk) {
+                if (fg.TestRifeRun(1, 2, 1)) {
+                    rife += fg.TestRifePsnr(1, 2, 3, t).psnr;
+                    rifeN++;
+                    if (save) SaveBmp(name + L"rife.bmp", fg.TestReadOutput(), w, h);
+                } else {
+                    printf("RIFE를 쓸 수 없어 건너뜁니다: %s\n", fg.TestRifeError().c_str());
+                    rifeOk = false;
+                }
+            }
+            if (save) {
+                SaveBmp(name + L"a.bmp", frames[k], w, h);
+                SaveBmp(name + L"truth.bmp", frames[k + c.part], w, h);
+                SaveBmp(name + L"b.bmp", frames[k + c.gap], w, h);
+            }
+            n++;
+        }
+        const double k = 1.0 / n;
+        const double rk = rifeN ? 1.0 / rifeN : 0;
+        printf("%-6d %-6.2f %8.2f %9.2f %9.2f %10.2f %9.2f\n", c.gap, t, hold * k, blend * k, block * k, blockLong * k, rife * rk);
+        fflush(stdout);
+        csv << c.gap << "," << t << "," << n << "," << hold * k << "," << blend * k << "," << block * k << "," << blockLong * k << ","
+            << rife * rk << "\n";
+    }
+    return 0;
 }

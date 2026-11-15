@@ -24,6 +24,7 @@ cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cmake -S . -B build
 - 사용자가 루트 exe를 실행 중이면 복사가 실패한다. 프로세스를 끄지 말고 알린다.
 - exe, `build/`, `OpenScaler.ini`, `profiles/`, `rife/`는 git에 올리지 않는다.
 - RIFE를 시험하려면 `rife` 폴더를 `build\`에도 두어야 한다 (`build\OpenScaler.exe`는 자기 옆에서 찾는다).
+- 이 PC에서는 Ninja가 헤더 의존성을 추적하지 못한다 (`build.ninja`의 `msvc_deps_prefix`가 깨진 한글로 저장됨). 헤더만 바꾸면 다시 컴파일되지 않고, 클래스 멤버를 바꾸면 옛 크기로 컴파일된 파일이 남아 힙 손상으로 죽는다. 헤더를 바꾼 뒤에는 `src\*.cpp`의 수정 시각을 갱신하고 빌드한다.
 - GitHub CLI(`gh`)는 없다. Actions 결과는 공개 API로 확인한다 (`tools/test/waitci.ps1`).
 
 ## 구조
@@ -49,7 +50,8 @@ cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cmake -S . -B build
 - 완료: 창 캡처, 5개 업스케일 모드(기본 FSR 1.0), 샤프닝, 정수배, 비교 모드, 상태 표시, 설정 저장, 커서 좌표 변환, 커서 속도 보정, 지연 감소, 설정 창, 로고와 아이콘, CI와 자동 릴리스
 - 프레임 생성: 블록 매칭, 학습 1, 2단계, RIFE 생성기, 슬로모션 테스트(보간, 외삽) 구현 완료. DJMAX는 이 PC(60Hz)에서 60fps로 캡처되어 실시간 생성이 작동하지 않으므로 슬로모션으로만 확인했다. 체감은 아직 확인하지 못했다.
 - DJMAX 테스트는 게임에 Enter 외의 입력을 보내지 않는다 (게임이 비정상 동작으로 보고 꺼질 수 있다). 사용자가 곡 선택 화면을 준비해 둔다.
-- 다음 작업: 테스트 기기에서 확인, 긴 간격 처리, 실시간 RIFE 속도. 결정, 측정 결과, 다른 기기 체크리스트는 `docs/frame-generation-plan.md`
+- 긴 간격(보통 간격의 2.5배 초과) 쌍은 칸 8, 낮은 벌점으로 추정한다. 측정은 `--fg-gaptest`로 슬로모션 덤프를 쓴다.
+- 다음 작업: 테스트 기기에서 확인, 실시간 RIFE 속도. 결정, 측정 결과, 다른 기기 체크리스트는 `docs/frame-generation-plan.md`
 - 남은 운영 작업: 이슈/PR 템플릿, CONTRIBUTING.md
 
 ## 사용 중인 단축키
