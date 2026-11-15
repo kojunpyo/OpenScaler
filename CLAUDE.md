@@ -24,6 +24,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 - 사용자가 루트 exe를 실행 중이면 복사가 실패한다. 프로세스를 끄지 말고 알린다.
 - exe, `build/`, `OpenScaler.ini`, `profiles/`, `rife/`는 git에 올리지 않는다.
 - RIFE를 시험하려면 `rife` 폴더를 `build\`에도 두어야 한다 (`build\OpenScaler.exe`는 자기 옆에서 찾는다).
+- 릴리스 zip의 `rife` 폴더는 GitHub Actions가 만든다 (NuGet에서 ONNX Runtime 1.24.4, DirectML 1.15.4, Hugging Face 모델을 받아 `tools/rife_export.py`로 변환, 캐시함). 버전을 바꾸면 워크플로의 캐시 키도 바꾼다.
 - `chcp 949`는 빼지 않는다. Ninja는 컴파일러의 "참고: 포함 파일:" 줄로 헤더 의존성을 기록하는데, CMake는 이 문구를 시스템 코드 페이지(949)로 저장하고 컴파일러는 콘솔 코드 페이지로 출력한다. Claude가 쓰는 셸은 65001(UTF-8)이라 둘이 어긋나면 의존성이 하나도 기록되지 않는다. 그러면 헤더만 바꿨을 때 다시 컴파일되지 않고, 클래스 멤버를 바꾸면 옛 크기로 컴파일된 파일이 남아 힙 손상으로 죽는다. 확인: `ninja -t deps CMakeFiles/OpenScaler.dir/src/main.cpp.obj`가 `#deps 0`이 아니어야 한다.
 - GitHub CLI(`gh`)는 없다. Actions 결과는 공개 API로 확인한다 (`tools/test/waitci.ps1`).
 
@@ -46,7 +47,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 
 ## 현재 상태
 
-- 코드 버전 1.0.0 (`main`). 공개 릴리스는 v1.0.0 (2026-11-15).
+- 코드 버전 1.0.1 (`main`). 공개 릴리스는 v1.0.1 (2026-11-15, rife 폴더 포함).
 - 완료: 창 캡처, 5개 업스케일 모드(기본 FSR 1.0), 샤프닝, 정수배, 비교 모드, 상태 표시, 설정 저장, 커서 좌표 변환, 커서 속도 보정, 지연 감소, 설정 창, 로고와 아이콘, CI와 자동 릴리스
 - 프레임 생성: 블록 매칭, 학습 1, 2단계, RIFE 생성기, 슬로모션 테스트(보간, 외삽) 구현 완료. DJMAX는 이 PC(60Hz)에서 60fps로 캡처되어 실시간 생성이 작동하지 않으므로 슬로모션으로만 확인했다. 체감은 아직 확인하지 못했다.
 - DJMAX 테스트는 게임에 Enter 외의 입력을 보내지 않는다 (게임이 비정상 동작으로 보고 꺼질 수 있다). 사용자가 곡 선택 화면을 준비해 둔다.

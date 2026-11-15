@@ -1,7 +1,7 @@
 # RIFE 학습 모델을 프레임 생성에 쓸 ONNX 파일로 바꾼다.
 #
 # 사용법: python -I tools/rife_export.py flownet.pkl rife.onnx
-# 필요: torch, onnx, onnxscript (변환할 때만 쓰고 배포물에는 들어가지 않는다)
+# 필요: torch, onnx, onnxscript (변환할 때만 쓰고 배포물에는 들어가지 않는다). onnxruntime이 있으면 변환 결과를 검사한다
 #
 # 아래 신경망 구조는 Practical-RIFE의 IFNet_HDv3(v4.25/4.26)를 옮긴 것이다.
 # 원본: https://github.com/hzwer/Practical-RIFE (MIT, Copyright (c) 2021 hzwer)
@@ -133,6 +133,18 @@ def main():
                                 dynamo=True, opset_version=17, dynamic_shapes=shapes, external_data=False)
     program.save(target, external_data=False)
     print("저장:", target)
+
+    # onnxruntime이 있으면 변환한 모델을 CPU로 돌려 PyTorch 결과와 비교한다 (자동 빌드에서 변환이 잘못되면 멈추게 한다).
+    try:
+        import onnxruntime
+    except ImportError:
+        return
+    session = onnxruntime.InferenceSession(target, providers=["CPUExecutionProvider"])
+    got = session.run(["flow", "mask"], {"img0": img0.numpy(), "img1": img1.numpy()})
+    diff = max(float(abs(got[0] - flow.numpy()).max()), float(abs(got[1] - mask.numpy()).max()))
+    print("ONNX Runtime과 PyTorch의 최대 차이:", diff)
+    if diff > 1e-2:
+        raise SystemExit("변환한 모델의 결과가 PyTorch와 다릅니다")
 
 
 if __name__ == "__main__":

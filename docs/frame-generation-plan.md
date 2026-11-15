@@ -290,7 +290,7 @@ DJMAX 녹화 두 개 (RIFE 녹화 / 블록 매칭 녹화의 진짜 프레임, 12
 
 - 진짜 프레임 쌍마다 신경망을 별도 스레드에서 한 번 돌려 시점 0.5의 움직임과 마스크를 얻고, 합성은 원본 해상도에서 셰이더로 한다. 입력을 줄여도 화면이 흐려지지 않고, 표시 프레임마다 신경망을 돌리지 않아도 된다.
 - 표시 시계를 신경망 시간만큼 더 늦추고, 새 결과가 나올 때까지 앞 프레임 쌍을 계속 보여 준다.
-- 실행 파일 옆 `rife` 폴더(약 57MB)의 DLL과 모델을 실행 중에 불러온다. 폴더가 없거나 실패하면 블록 매칭을 쓴다 (폴더 없이 실행해 확인함). git과 공개 릴리스 zip에는 들어가지 않는다.
+- 실행 파일 옆 `rife` 폴더(약 57MB)의 DLL과 모델을 실행 중에 불러온다. 폴더가 없거나 실패하면 블록 매칭을 쓴다 (폴더 없이 실행해 확인함). git에는 넣지 않고, 자동 빌드가 NuGet과 Hugging Face에서 받아 모델을 변환한 뒤 릴리스 zip에 넣는다 (`tools/rife_export.py`가 ONNX Runtime CPU 결과와 PyTorch 결과를 비교해 다르면 멈춘다).
 - 모델은 RIFE v4.26 (Hugging Face `hzwer/RIFE`의 `RIFEv4.26_0921.zip`). `python -I tools/rife_export.py flownet.pkl rife.onnx`로 변환한다.
 - 신경망은 Windows의 DirectML로 돌리므로 GPU 제조사에 묶이지 않지만, NVIDIA GTX 1060에서만 확인했다.
 

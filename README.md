@@ -102,7 +102,7 @@ OpenScaler는 게임과 상관없이 **화면만 보고** 이 두 문제를 처�
 | 방식: 보간 | 게임 프레임 두 장 사이에 중간 프레임을 만듭니다. 정확하지만 화면이 게임 프레임 한 장만큼 늦어집니다 |
 | 방식: 외삽 | 지금까지의 움직임으로 다음 게임 프레임이 오기 전 장면을 미리 만듭니다. 늦어지지 않지만 덜 정확합니다 |
 | 움직임 찾기 엔진: 블록 매칭 | 화면을 작은 칸으로 나눠 앞뒤 프레임에서 같은 모양을 찾아 움직임을 구합니다. 추가 파일 없이 바로 씁니다 |
-| 움직임 찾기 엔진: RIFE | 신경망([RIFE](https://github.com/hzwer/Practical-RIFE))으로 움직임을 찾습니다. 빠른 움직임과 밝기 변화에 강합니다. 별도 파일이 필요하고 보간에서만 씁니다 ([설치](#rife-엔진-설치-선택)) |
+| 움직임 찾기 엔진: RIFE | 신경망([RIFE](https://github.com/hzwer/Practical-RIFE))으로 움직임을 찾습니다. 빠른 움직임과 밝기 변화에 강합니다. 보간에서만 씁니다 ([RIFE 엔진](#rife-엔진)) |
 | 배수 | 주사율까지 자동으로 채우거나 2배, 3배, 4배로 고정합니다 |
 | 정밀도 | 움직임을 찾는 영상의 해상도를 낮음, 기본, 높음 중에서 고릅니다. RIFE가 제때 끝나지 못하면 해상도를 자동으로 낮춥니다 |
 | 게임별 학습과 화면 지도 | 게임 프레임 하나를 가리고 양옆으로 다시 만들어 정답과 비교해 채점합니다. 점수가 좋아지는 쪽으로 게임마다 설정을 바꾸고, 자주 움직이는 곳과 방향을 화면 지도로 쌓아, 채점에서 더 좋을 때만 움직임 찾기에 참고합니다. 화면은 저장하지 않습니다 |
@@ -175,17 +175,19 @@ OpenScaler는 게임과 상관없이 **화면만 보고** 이 두 문제를 처�
 
 이 테스트로는 실제 지연, 끊김, 그래픽카드 여유를 확인할 수 없습니다. 재생 중에도 게임은 뒤에서 계속 돌아가고, 필요한 메모리가 4GB를 넘으면 시작하지 않습니다.
 
-### RIFE 엔진 설치 (선택)
+### RIFE 엔진
 
-RIFE 엔진을 쓰려면 실행 파일 옆에 `rife` 폴더가 있어야 합니다. 약 57MB라 기본 배포 파일에는 넣지 않았고, 폴더가 없으면 블록 매칭을 씁니다.
+릴리스 zip에는 RIFE 엔진에 필요한 `rife` 폴더(약 57MB)가 들어 있어, 압축을 풀면 설정 창의 **움직임 찾기 → 엔진**에서 바로 RIFE를 고를 수 있습니다. 처음 고르면 신경망을 준비하느라 몇 초 걸리고, 그동안은 블록 매칭을 씁니다. `rife` 폴더를 지우면 블록 매칭만 씁니다.
+
+신경망은 Windows의 DirectML로 돌리므로 그래픽카드 제조사에 묶이지 않습니다. 그래픽카드가 둘인 노트북에서는 성능이 높은 쪽을 고릅니다.
+
+직접 빌드했다면 `rife` 폴더를 `OpenScaler.exe` 옆에 직접 만들어야 합니다. 자동 빌드(`.github/workflows/build.yml`)도 같은 방법으로 만듭니다.
 
 | 파일 | 얻는 곳 |
 |---|---|
 | `onnxruntime.dll`, `onnxruntime_providers_shared.dll` | NuGet `Microsoft.ML.OnnxRuntime.DirectML` 1.24.4의 `runtimes/win-x64/native` |
 | `DirectML.dll` | NuGet `Microsoft.AI.DirectML` 1.15.4의 `bin/x64-win` |
 | `rife.onnx` | [RIFE v4.26 모델](https://huggingface.co/hzwer/RIFE)의 `flownet.pkl`을 `python -I tools/rife_export.py flownet.pkl rife.onnx`로 변환 (torch, onnx, onnxscript 필요) |
-
-신경망은 Windows의 DirectML로 돌리므로 그래픽카드 제조사에 묶이지 않습니다. 그래픽카드가 둘인 노트북에서는 성능이 높은 쪽을 고릅니다.
 
 ### 설정 파일
 
@@ -304,7 +306,7 @@ OpenScaler.exe --target "창 제목 일부" --mode 4 --sharp 0.5 --fg --duration
 | `--fg-mult` | 배수 (2~4, 없으면 주사율까지 자동) |
 | `--fg-quality` | 정밀도 (0: 낮음, 1: 기본, 2: 높음) |
 | `--fg-extrapolate` | 보간 대신 외삽 |
-| `--fg-rife` | 움직임 찾기 엔진을 RIFE로 (실행 파일 옆에 `rife` 폴더 필요) |
+| `--fg-rife` | 움직임 찾기 엔진을 RIFE로 |
 | `--fg-visualize` | 찾아낸 움직임을 색으로 표시 |
 | `--fg-log` | 화면마다 표시 시점을 파일에 기록 |
 | `--slowmo-auto` | `--target`으로 확대를 시작하고 지정한 초 뒤에 슬로모션 테스트 녹화 |
@@ -384,5 +386,5 @@ OpenScaler.exe --target "창 제목 일부" --mode 4 --sharp 0.5 --fg --duration
 - `third_party/onnxruntime`의 헤더는 Microsoft의 저작물이며 MIT 라이선스를 따릅니다 ([third_party/onnxruntime/LICENSE](third_party/onnxruntime/LICENSE)).
 - `tools/rife_export.py`의 신경망 구조는 [Practical-RIFE](https://github.com/hzwer/Practical-RIFE)(MIT, Copyright (c) 2021 hzwer)를 옮긴 것입니다. 학습 모델도 같은 MIT로 공개되어 있습니다.
 - `src/shaders.h`의 Bicubic 함수는 MJP의 [Catmull-Rom 샘플링 코드](https://gist.github.com/TheRealMJP/c83b8c0f46b63f3a88a5986f4fa982b1)(MIT, Copyright (c) 2019 MJP)를 옮긴 것입니다. 라이선스 전문은 파일 맨 위에 있습니다.
-- `rife` 폴더를 쓸 때의 DirectML.dll은 오픈소스가 아니며 Microsoft의 라이선스를 따릅니다. 폴더 안의 `LICENSE-DirectML.txt`를 함께 두어야 합니다.
+- 릴리스 zip의 `rife` 폴더에 든 ONNX Runtime은 Microsoft의 MIT 라이선스, RIFE 모델은 hzwer의 MIT 라이선스를 따릅니다. DirectML.dll은 오픈소스가 아니며, 앱과 함께 배포하는 것을 허용하는 Microsoft의 라이선스를 따릅니다. 각 라이선스와 고지는 폴더 안의 `LICENSE-*.txt`, `ThirdPartyNotices-*.txt`에 있습니다.
 - `third_party/galmuri`의 Galmuri11 Bold와 Galmuri11 Condensed는 이민서(quiple)의 저작물이며 SIL Open Font License 1.1을 따릅니다 ([third_party/galmuri/OFL.md](third_party/galmuri/OFL.md)). 원작자 설명에 따르면 이 두 글꼴의 글리프는 모두 원작자의 창작물이라, 다른 게임 글꼴의 저작권 문제 없이 쓸 수 있습니다.
