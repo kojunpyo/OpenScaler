@@ -27,7 +27,7 @@ struct Settings {
     int fgMultiplier = 0;            // 0: 주사율까지 자동으로 채우기, 2~4: 진짜 프레임 사이를 그 수만큼 나눈다
     int fgQuality = 1;               // 0: 빠름, 1: 기본, 2: 고품질
     int fgMethod = 0;                // 0: 보간, 1: 외삽(실험)
-    int fgGenerator = 1;             // 0: 블록 매칭, 1: RIFE (기본값. rife 폴더가 없으면 블록 매칭)
+    int fgGenerator = 0;             // 0: 블록 매칭 (기본값, 게임별 학습이 맞춘다), 1: RIFE
     int fgPreset = FG_PRESET_AUTO;   // 화면 지도: 자동이면 채점에서 더 좋을 때만 쓴다
     bool fgLearn = true;             // 게임별 학습
     bool fgVisualize = false;        // 움직임을 색으로 표시 (발표용, 저장하지 않는다)
@@ -37,7 +37,7 @@ struct Settings {
 };
 
 // 설정 창의 "방식": 생성기와 보간/외삽을 하나로 묶어 고르게 한다. 외삽은 블록 매칭으로만 만든다.
-enum FgMode { FG_MODE_RIFE, FG_MODE_BLOCK, FG_MODE_EXTRAPOLATE, FG_MODE_COUNT };
+enum FgMode { FG_MODE_BLOCK, FG_MODE_RIFE, FG_MODE_EXTRAPOLATE, FG_MODE_COUNT };
 inline int FgModeOf(const Settings& s)
 {
     if (s.fgMethod == 1) return FG_MODE_EXTRAPOLATE;

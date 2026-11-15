@@ -1000,7 +1000,7 @@ static void DrawOsd(ScalingSession* s)
         if (g_settings.frameGen && g_frameGen) {
             const FgStats& fg = g_frameGen->Stats();
             wchar_t line[160];
-            static const wchar_t* const kModeLabels[FG_MODE_COUNT] = { L"RIFE", L"블록 매칭", L"외삽" };
+            static const wchar_t* const kModeLabels[FG_MODE_COUNT] = { L"블록 매칭", L"RIFE", L"외삽" };
             const wchar_t* method = kModeLabels[FgModeOf(g_settings)];
             if (fg.noRoom)
                 swprintf_s(line, L"\n프레임 생성 ON (%ls)  ·  게임이 %.0f fps라 넣을 자리가 없음", method, fg.realFps);

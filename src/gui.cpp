@@ -119,8 +119,8 @@ const char* kSharpnessDesc = "확대로 흐려진 윤곽선을 또렷하게 해�
 const char* kIntegerDesc = "2배, 3배처럼 정수 배율로만 키워 픽셀이 고르게 커져요. 픽셀 아트용, 가장자리에 여백이 생길 수 있어요.";
 const char* kFpsFormat = "출력 %.0f fps · 캡처 %.0f fps";
 const char* kFooter = "설정은 OpenScaler.ini에 자동 저장돼요";
-const char* kModeRifeDesc = "RIFE: 신경망으로 게임 프레임 사이의 움직임을 찾아 중간 프레임을 넣어요. 가장 깨끗하지만 화면이 한 프레임과 계산 시간만큼 늦어져요.";
-const char* kModeBlockDesc = "블록 매칭: 화면을 작은 칸으로 나눠 움직임을 찾아 중간 프레임을 넣어요. 가볍지만 빠른 움직임에서 깨질 수 있어요.";
+const char* kModeRifeDesc = "RIFE: 신경망으로 게임 프레임 사이의 움직임을 찾아 중간 프레임을 넣어요. 빠른 움직임에 강하지만 GPU를 더 쓰고, 화면이 한 프레임과 계산 시간만큼 늦어져요. 게임별 학습은 적용되지 않아요.";
+const char* kModeBlockDesc = "블록 매칭: 화면을 작은 칸으로 나눠 움직임을 찾아 중간 프레임을 넣어요. 게임별 학습으로 게임마다 값이 맞춰져요. 화면이 한 프레임 늦어져요.";
 const char* kModeExtrapolateDesc = "외삽: 지금까지의 움직임으로 다음 게임 프레임이 오기 전 장면을 미리 만들어요. 늦어지지 않지만 덜 정확해요.";
 const char* kFgStatusFormat = "게임 %.0f fps · 움직임 찾기 %.1f ms · 합성 %.1f ms";
 const char* kFgNoRoomFormat = "게임이 %.0f fps라 넣을 자리가 없어요";
@@ -825,11 +825,11 @@ void DrawUi()
     BeginBox("##framegen", "프레임 생성", kGrayPalette);
     if (PixelCheckbox("프레임 생성 켜기", &s.frameGen)) changed = true;
     const int fgMode = FgModeOf(s);
-    static const char* const kModeDescs[FG_MODE_COUNT] = { kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc };
+    static const char* const kModeDescs[FG_MODE_COUNT] = { kModeBlockDesc, kModeRifeDesc, kModeExtrapolateDesc };
     Description(kModeDescs[fgMode]);
 
-    // 방식: 생성기와 보간/외삽을 하나로 묶었다. 대부분은 RIFE를 그대로 쓰면 된다.
-    static const char* const kFgModeNames[FG_MODE_COUNT] = { "RIFE (추천)", "블록 매칭 (가벼움)", "외삽 (실험, 지연 없음)" };
+    // 방식: 생성기와 보간/외삽을 하나로 묶었다. 기본값은 게임별 학습이 맞추는 블록 매칭 보간이다.
+    static const char* const kFgModeNames[FG_MODE_COUNT] = { "블록 매칭 보간 (기본)", "RIFE 보간", "블록 매칭 외삽 (실험)" };
     int modeIndex = fgMode;
     RowLabel("방식");
     LeaveRoomForHelp();
@@ -837,9 +837,9 @@ void DrawUi()
         SetFgMode(s, modeIndex);
         changed = true;
     }
-    HelpMarker("RIFE: 가장 깨끗해요. 처음 고르면 준비하는 몇 초 동안과 rife 폴더가 없을 때는 블록 매칭을 써요.\n"
-               "블록 매칭: 그래픽카드가 느려서 RIFE가 버거울 때 고르세요.\n"
-               "외삽: 화면이 늦어지는 것이 싫을 때 고르세요. 일정하게 움직이는 리듬게임 노트용 실험 기능이에요.");
+    HelpMarker("블록 매칭 보간: 기본값이에요. 쓸수록 게임별 학습이 그 게임에 맞춰요.\n"
+               "RIFE 보간: 빠른 움직임이나 밝기 변화가 많아 블록 매칭이 깨질 때 고르세요. GPU를 더 쓰고, 준비하는 몇 초 동안과 rife 폴더가 없을 때는 블록 매칭을 써요.\n"
+               "블록 매칭 외삽: 화면이 늦어지는 것이 싫을 때 고르세요. 일정하게 움직이는 리듬게임 노트용 실험 기능이에요.");
     if (fgMode == FG_MODE_RIFE) {
         if (!RifeEngine::FilesExist(RifeEngine::DefaultDirectory())) Description(kRifeMissing);
         else if (status.fgRifeState == 0) Description(kRifeLoading);
