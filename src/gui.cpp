@@ -128,9 +128,11 @@ const char* kFgRifeFormat = "게임 %.0f fps · 신경망 %.0f ms · 합성 %.1f
 const char* kRifeLoading = "RIFE 준비 중이에요. 그동안은 블록 매칭을 써요.";
 const char* kRifeFailed = "RIFE를 쓸 수 없어 블록 매칭을 써요. 실행 파일 옆 rife 폴더를 확인하세요.";
 const char* kRifeMissing = "실행 파일 옆에 rife 폴더가 없어 블록 매칭을 써요.";
-const char* kLearnDesc = "게임 프레임을 가리고 다시 만들어 채점하며 게임마다 값을 맞춰요. 화면은 저장하지 않아요.";
-const char* kLearnFormat = "채점 %d회 · 설정을 바꾼 횟수 %d회 · 지금 기본값과 다른 설정 %d개";
+const char* kLearnDesc = "게임 프레임을 가리고 다시 만들어 채점하며 게임마다 값을 맞춰요. 보간과 외삽은 따로 배워요. 화면은 저장하지 않아요.";
+const char* kLearnInterpFormat = "보간: 채점 %d회 · 설정을 바꾼 횟수 %d회 · 기본값과 다른 설정 %d개";
+const char* kLearnExtrapFormat = "외삽: 채점 %d회 · 설정을 바꾼 횟수 %d회 · 기본값과 다른 설정 %d개";
 const char* kGraphLegend = "분홍: 프레임 생성 · 회색: 두 장을 단순히 섞은 것 (dB, 높을수록 좋음)";
+const char* kGraphLegendExtrap = "분홍: 외삽 · 회색: 앞 프레임을 그대로 둔 것 (dB, 높을수록 좋음)";
 const char* kNoProfiles = "아직 기록이 없어요. 프레임 생성을 켜고 게임을 확대하면 생겨요.";
 const char* kNoHistory = "채점이 20번 쌓이면 그래프가 나와요";
 const char* kSlowMoDesc = "짧게 녹화해 프레임을 채운 뒤 느리게 틀어요. 고주사율 모니터가 없어도 그 모니터에서 보일 장면을 모두 볼 수 있어요. 프레임 생성이 꺼져 있어도 돼요.";
@@ -143,7 +145,7 @@ const char* kSlowMoPlaying = "재생 중 %d / %d";
 const char* kSecondaryTexts[] = { kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
                                   kFgRifeFormat, kRifeLoading, kRifeFailed, kRifeMissing,
                                   kSlowMoDesc, kSlowMoIdle, kSlowMoPlan, kSlowMoWaiting, kSlowMoRecording, kSlowMoGenerating, kSlowMoPlaying,
-                                  kLearnDesc, kLearnFormat, kGraphLegend, kNoProfiles, kNoHistory,
+                                  kLearnDesc, kLearnInterpFormat, kLearnExtrapFormat, kGraphLegend, kGraphLegendExtrap, kNoProfiles, kNoHistory,
                                   "(?)" };
 
 const char* kHotkeys[][2] = {
@@ -657,7 +659,7 @@ void DrawLearning(const ScalingStatus& status)
     RefreshProfiles();
     const GameProfile* active = AppActiveProfile();
 
-    if (g_profileNames.empty() && !(active && active->evalCount > 0)) {
+    if (g_profileNames.empty() && !(active && active->interp.evalCount + active->extrap.evalCount > 0)) {
         Description(kNoProfiles);
         return;
     }
@@ -679,28 +681,35 @@ void DrawLearning(const ScalingStatus& status)
     const GameProfile* view = isActive ? active : (g_profileViewValid ? &g_profileView : nullptr);
     if (!view) return;
 
-    // 학습된 값은 몇 개가 기본값과 다른지만 보여 주고, 자세한 값은 (?)에 담는다.
+    // 보간과 외삽은 따로 배운다. 학습된 값은 몇 개가 기본값과 다른지만 보여 주고, 자세한 값은 (?)에 담는다.
     const FgParams defaults;
-    const FgParams& p = view->params;
-    const int differs = (p.cellPx != defaults.cellPx) + (p.coarseRadius != defaults.coarseRadius) + (p.smoothness != defaults.smoothness) +
-                        (p.blendTol != defaults.blendTol) + (p.useMap != defaults.useMap);
-    char text[160];
-    snprintf(text, sizeof(text), kLearnFormat, view->evalCount, view->adoptedCount, differs);
-    Description(text);
-    char detail[512];
-    snprintf(detail, sizeof(detail),
-             "지금 이 게임에 쓰는 값 (괄호는 기본값)\n"
-             "움직임을 찾는 칸 크기: %d픽셀 (%d)\n"
-             "움직임을 찾는 범위: %d (%d)\n"
-             "주변과 다른 움직임에 주는 벌점: %.4f (%.4f)\n"
-             "합성할 때 허용하는 밝기 차이: %.2f (%.2f)\n"
-             "화면 지도: %s (%s)",
-             p.cellPx, defaults.cellPx, p.coarseRadius, defaults.coarseRadius, p.smoothness, defaults.smoothness, p.blendTol, defaults.blendTol,
-             p.useMap ? "씀" : "안 씀", defaults.useMap ? "씀" : "안 씀");
-    HelpMarker(detail);
-    if (view->history.size() >= 2) {
-        DrawScoreGraph(view->history, view->baseline);
-        Description(kGraphLegend);
+    for (int k = 0; k < 2; k++) {
+        const FgLearner& l = view->Learner(k == 1);
+        if (k == 1 && l.evalCount == 0) continue;  // 외삽을 쓴 적이 없으면 줄을 만들지 않는다
+        const FgParams& p = l.params;
+        const int differs = (p.cellPx != defaults.cellPx) + (p.coarseRadius != defaults.coarseRadius) + (p.smoothness != defaults.smoothness) +
+                            (p.blendTol != defaults.blendTol) + (p.useMap != defaults.useMap);
+        char text[192];
+        snprintf(text, sizeof(text), k == 0 ? kLearnInterpFormat : kLearnExtrapFormat, l.evalCount, l.adoptedCount, differs);
+        Description(text);
+        char detail[512];
+        snprintf(detail, sizeof(detail),
+                 "%s에 쓰는 값 (괄호는 기본값)\n"
+                 "움직임을 찾는 칸 크기: %d픽셀 (%d)\n"
+                 "움직임을 찾는 범위: %d (%d)\n"
+                 "주변과 다른 움직임에 주는 벌점: %.4f (%.4f)\n"
+                 "합성할 때 허용하는 밝기 차이: %.2f (%.2f)\n"
+                 "화면 지도: %s (%s)",
+                 k == 0 ? "보간" : "외삽", p.cellPx, defaults.cellPx, p.coarseRadius, defaults.coarseRadius, p.smoothness, defaults.smoothness,
+                 p.blendTol, defaults.blendTol, p.useMap ? "씀" : "안 씀", defaults.useMap ? "씀" : "안 씀");
+        HelpMarker(detail);
+    }
+    // 그래프는 지금 고른 방식의 학습을 보여 준다.
+    const bool showExtrap = FgModeOf(AppSettings()) == FG_MODE_EXTRAPOLATE;
+    const FgLearner& shown = view->Learner(showExtrap);
+    if (shown.history.size() >= 2) {
+        DrawScoreGraph(shown.history, shown.baseline);
+        Description(showExtrap ? kGraphLegendExtrap : kGraphLegend);
     } else {
         Description(kNoHistory);
     }

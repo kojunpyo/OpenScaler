@@ -473,20 +473,47 @@ void FrameGen::UpdateMapTexture()
     m_ctx->UpdateSubresource(m_mapTex.get(), 0, nullptr, data.data(), kMapW * 4 * sizeof(float), 0);
 }
 
+FgParams FrameGen::LearnedParams(const FgOptions& options) const
+{
+    return m_profile ? m_profile->Learner(options.method == FG_METHOD_EXTRAPOLATE).params : FgParams{};
+}
+
 void FrameGen::RunEvaluation(const FgOptions& options)
 {
     if (!m_profile) return;
-    // 가운데 프레임을 가리고 양옆 프레임으로 만들어 본다. 간격이 2배이므로 절대 점수보다 비교에 쓴다.
     const Frame& f2 = m_frames[0];
     const Frame& f1 = m_frames[1];
     const Frame& f0 = m_frames[2];
-    const double gap = f2.time - f0.time;
     const bool mapReady = options.useMap && m_profile->mapSamples >= 20;
+    const bool extrapolate = options.method == FG_METHOD_EXTRAPOLATE;
+    const FgLearner& learner = m_profile->Learner(extrapolate);
 
     m_evalCurrentGroup = ++m_evalGroup;
     m_evalFilled = 0;
+    m_evalExtrapolate = extrapolate;
 
-    const FgParams evalParams[2] = { Effective(m_profile->params, options), Effective(m_profile->Candidate(), options) };
+    const FgParams evalParams[2] = { Effective(learner.params, options), Effective(learner.Candidate(), options) };
+    if (extrapolate) {
+        // 외삽: 실시간과 같이 앞의 두 장(f0, f1)만 보고 다음 게임 프레임(f2)의 시각까지 예측한 뒤 진짜 f2와 비교한다.
+        // 기준은 프레임 생성이 없을 때와 같은 "f1 그대로"다.
+        const double pairGap = f1.time - f0.time;
+        if (pairGap <= 0 || f2.time <= f1.time) {
+            m_evalCurrentGroup = -1;
+            return;
+        }
+        const float t = (float)std::min(1.0 + (f2.time - f1.time) / pairGap, ExtrapolateLimit(pairGap, m_interval));
+        for (int i = 0; i < 2; i++) {
+            FlowSet& set = GetFlowSet(evalParams[i].cellPx);
+            Estimate(f0, f1, evalParams[i], set, false, mapReady && evalParams[i].useMap, pairGap);
+            Synthesize(f0, f1, set, t, evalParams[i], m_evalOutput.uav.get());
+            QueueMse(m_evalOutput.srv.get(), f2.colorSrv.get(), m_evalCurrentGroup, i);
+        }
+        QueueMse(f1.colorSrv.get(), f2.colorSrv.get(), m_evalCurrentGroup, 2);
+        return;
+    }
+
+    // 보간: 가운데 프레임을 가리고 양옆 프레임으로 만들어 본다. 간격이 2배이므로 절대 점수보다 비교에 쓴다.
+    const double gap = f2.time - f0.time;
     for (int i = 0; i < 2; i++) {
         FlowSet& set = GetFlowSet(evalParams[i].cellPx);
         // 실시간 움직임과 같은 격자를 쓰면 다음 프레임의 합성이 어긋나므로, 채점 뒤 다시 계산한다.
@@ -528,7 +555,8 @@ void FrameGen::PollReadbacks()
             float mse = (float)(sum / ((size_t)p.w * p.h));
             if (p.evalGroup == m_evalCurrentGroup) {
                 m_evalScores[p.evalIndex] = PsnrFromMse(mse);
-                if (++m_evalFilled == 3 && m_profile) m_profile->AddEvaluation(m_evalScores[0], m_evalScores[1], m_evalScores[2]);
+                if (++m_evalFilled == 3 && m_profile)
+                    m_profile->Learner(m_evalExtrapolate).AddEvaluation(m_evalScores[0], m_evalScores[1], m_evalScores[2], m_profile->mapSamples);
             }
         } else if (m_profile) {
             m_profile->AddFlowSample(static_cast<const float*>(mapped.pData), (int)p.w, (int)p.h,
@@ -657,7 +685,7 @@ void FrameGen::PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, c
     TimerBegin(m_timerEstimate);
     if (m_pairValid) {
         UpdateMapTexture();
-        FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        FgParams params = Effective(LearnedParams(options), options);
         const bool longGap = IsLongGap(gap, m_interval);
         if (longGap) params = ForLongGap(params);
         FlowSet& set = GetFlowSet(params.cellPx);
@@ -889,7 +917,7 @@ ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
     } else {
         // RIFE 결과가 없으면 블록 매칭으로 대신한다.
         if (wantRife) m_stats.rifeMissed++;
-        const FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        const FgParams params = Effective(LearnedParams(options), options);
         if (usePrevious) {
             FlowSet olderSet = *m_olderFlow;
             olderSet.flow = olderSet.older;
@@ -1031,7 +1059,7 @@ bool FrameGen::SlowMoGenerateStep(const FgOptions& options)
         m_ctx->CopyResource(b.color.get(), first.tex.get());
         BuildPyramid(a);
         BuildPyramid(b);
-        FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        FgParams params = Effective(LearnedParams(options), options);
         const bool longGap = IsLongGap(prevGap, m_slowMoTypical);
         if (longGap) params = ForLongGap(params);
         FlowSet& set = GetFlowSet(params.cellPx);
@@ -1063,7 +1091,7 @@ bool FrameGen::SlowMoGenerateStep(const FgOptions& options)
                 m_slowMoRifeHeight = (int)m_rifeH;
             }
         }
-        FgParams params = Effective(m_profile ? m_profile->params : FgParams{}, options);
+        FgParams params = Effective(LearnedParams(options), options);
         const bool longGap = IsLongGap(gap, m_slowMoTypical);
         if (longGap) params = ForLongGap(params);
         FlowSet& set = GetFlowSet(params.cellPx);

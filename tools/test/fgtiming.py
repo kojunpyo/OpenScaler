@@ -38,7 +38,8 @@ stalls = sum(abs(s) < 0.5 for s in steps)
 backs = sum(s < -0.5 for s in steps)
 skips = sum(s > 2 * frame_ms for s in steps)
 hitches = sum(g > 1.5 * frame_ms for g in gaps)
-latency = statistics.median([(r[0] - r[7]) * 1000 for r in rows if r[7] > 0])
+lat_values = [(r[0] - r[7]) * 1000 for r in rows if r[7] > 0]
+latency = statistics.median(lat_values) if lat_values else 0  # 넣을 자리가 없으면 화면 속 시각이 기록되지 않는다
 game_ms = 1000 / game_fps if game_fps > 0 else 0
 
 print(f"측정 {duration:.1f}초, 주사율 약 {refresh:.0f}Hz (한 칸 {frame_ms:.2f}ms), 게임 {game_fps:.1f}fps")
@@ -58,7 +59,8 @@ if steps:
     show("건너뜀 (2칸 넘게)", f"분당 {skips / minutes:.1f}번", grade(skips / minutes, 1, 6, False), "분당 1번 / 6번 이하")
     show("되돌아감", f"{backs}번", "좋음" if backs == 0 else "나쁨", "0번")
 added = latency - game_ms
-show("지연 (게임 프레임 간격 제외)", f"{latency:.1f}ms (+{added:.1f}ms)" if latency > 1 else f"{latency:.1f}ms", grade(added, 10, 25, False), "+10ms / +25ms 이하")
+if lat_values:
+    show("지연 (게임 프레임 간격 제외)", f"{latency:.1f}ms (+{added:.1f}ms)" if latency > 1 else f"{latency:.1f}ms", grade(added, 10, 25, False), "+10ms / +25ms 이하")
 shown = rows[-1][4] - rows[0][4]
 missed = rows[-1][5] - rows[0][5]
 if shown + missed > 0:

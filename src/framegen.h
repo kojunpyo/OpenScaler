@@ -205,6 +205,7 @@ private:
     bool IsDuplicate(const Frame& a, const Frame& b);
 
     void RunEvaluation(const FgOptions& options);
+    FgParams LearnedParams(const FgOptions& options) const;  // 이 게임에서 지금 방식(보간/외삽)으로 학습한 값
     void QueueFlowSample(const FlowSet& set, double interval);
     void PollReadbacks();
     void UpdateMapTexture();
@@ -261,6 +262,7 @@ private:
     std::array<float, 3> m_evalScores{};
     int m_evalFilled = 0;
     int m_evalCurrentGroup = -1;
+    bool m_evalExtrapolate = false;  // 이번 채점이 외삽 학습용인지
 
     std::unique_ptr<RifeEngine> m_rife;
     UINT m_rifeW = 0, m_rifeH = 0;

@@ -669,7 +669,7 @@ static void StopScaling()
         g_frameGen->SetProfile(nullptr);
         g_frameGen->Reset();
     }
-    if (g_scaling->profile.evalCount > 0 || g_scaling->profile.mapSamples > 0)
+    if (g_scaling->profile.interp.evalCount + g_scaling->profile.extrap.evalCount > 0 || g_scaling->profile.mapSamples > 0)
         g_scaling->profile.Save(ProfilesDirectory());
     if (g_scaling->session) g_scaling->session.Close();
     if (g_scaling->framePool) g_scaling->framePool.Close();
@@ -1410,7 +1410,7 @@ static void PrintStatus()
     // 비정상 종료에 대비해 학습 결과를 가끔 저장한다.
     if (now - g_scaling->profileSaveTime > std::chrono::seconds(60)) {
         g_scaling->profileSaveTime = now;
-        if (g_scaling->profile.evalCount > 0 || g_scaling->profile.mapSamples > 0)
+        if (g_scaling->profile.interp.evalCount + g_scaling->profile.extrap.evalCount > 0 || g_scaling->profile.mapSamples > 0)
             g_scaling->profile.Save(ProfilesDirectory());
     }
 }

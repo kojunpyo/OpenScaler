@@ -31,28 +31,50 @@ struct MapCell {
     float coherence = 0;    // 움직임이 한 방향으로 모여 있는 정도
 };
 
-struct GameProfile {
-    std::wstring name;
+// 설정 자동 조정(학습 1단계) 하나. 보간과 외삽은 잘 맞는 값이 달라 따로 배운다.
+struct FgLearner {
     FgParams params;
-    int genre = GENRE_GENERAL;     // 통계로 판단한 유형
-
-    // 학습 기록
-    int evalCount = 0;             // 진짜 프레임으로 채점한 횟수
+    int evalCount = 0;             // 게임 프레임으로 채점한 횟수
     int adoptedCount = 0;          // 더 좋은 값으로 바꾼 횟수
     float bestPsnr = 0;            // 지금 설정의 최근 점수
-    std::vector<float> history;    // 움직임 보간 점수 (dB)
-    std::vector<float> baseline;   // 같은 구간의 단순 블렌딩 점수 (dB)
+    std::vector<float> history;    // 지금 설정의 점수 (dB)
+    std::vector<float> baseline;   // 같은 구간의 기준 점수 (dB). 보간은 단순 블렌딩, 외삽은 앞 프레임 그대로
+
+    // 지금 시험 중인 후보 값. 같은 게임 프레임으로 현재 값과 짝지어 채점한다.
+    FgParams Candidate() const { return m_candidate; }
+    // 채점 결과 한 쌍(dB)을 넣는다. 후보가 충분히 좋으면 채택한다. mapSamples: 화면 지도 표본 수
+    void AddEvaluation(float currentDb, float candidateDb, float baselineDb, int mapSamples);
+    // 처음이나 불러온 뒤에 첫 후보를 정한다.
+    void Start(int mapSamples);
+
+private:
+    void NextCandidate(int mapSamples);
+
+    FgParams m_candidate;
+    int m_axis = 0;       // 지금 바꿔 보는 값 (칸 크기, 탐색 범위, 벌점, 허용치, 화면 지도)
+    int m_step = 0;
+    int m_pairs = 0;
+    int m_trials = 0;
+    std::vector<float> m_deltas;  // 이번 후보의 채점마다 (후보 - 현재) dB
+    float m_sumCurrent = 0, m_sumBaseline = 0;
+    int m_historyCount = 0;
+};
+
+struct GameProfile {
+    std::wstring name;
+    int genre = GENRE_GENERAL;     // 통계로 판단한 유형
+
+    // 보간: 가운데 게임 프레임을 가리고 양옆으로 다시 만들어 채점한다 (블록 매칭 보간, RIFE를 쓰는 동안의 채점).
+    // 외삽: 앞의 두 게임 프레임으로 다음 프레임을 예측해 채점한다 (블록 매칭 외삽).
+    FgLearner interp;
+    FgLearner extrap;
+    FgLearner& Learner(bool extrapolate) { return extrapolate ? extrap : interp; }
+    const FgLearner& Learner(bool extrapolate) const { return extrapolate ? extrap : interp; }
 
     std::vector<MapCell> map;      // kMapW * kMapH
     int mapSamples = 0;
 
     GameProfile();
-
-    // 설정 자동 조정 -------------------------------------------------------
-    // 지금 시험 중인 후보 값. 같은 프레임 세 장으로 현재 값과 짝지어 채점한다.
-    FgParams Candidate() const { return m_candidate; }
-    // 채점 결과 한 쌍(dB)을 넣는다. 후보가 충분히 좋으면 채택한다.
-    void AddEvaluation(float currentDb, float candidateDb, float blendDb);
 
     // 화면 지도 --------------------------------------------------------------
     // 움직임 격자(xyzw float)를 칸별로 모아 지도를 갱신한다. interval: 진짜 프레임 간격(초)
@@ -62,17 +84,6 @@ struct GameProfile {
     bool Save(const std::wstring& dir) const;
     bool Load(const std::wstring& path);
 
-private:
-    void NextCandidate();
-
-    FgParams m_candidate;
-    int m_axis = 0;       // 지금 바꿔 보는 값 (칸 크기, 탐색 범위, 벌점, 허용치, 화면 지도)
-    int m_step = 0;
-    int m_pairs = 0;
-    int m_trials = 0;
-    std::vector<float> m_deltas;  // 이번 후보의 채점마다 (후보 - 현재) dB
-    float m_sumCurrent = 0, m_sumBlend = 0;
-    int m_historyCount = 0;
 };
 
 std::wstring ProfilesDirectory();

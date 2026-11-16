@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <ppl.h>
 #include <functional>
@@ -20,6 +21,13 @@
 #include "rife.h"
 
 namespace {
+
+// 결과 폴더를 상위 폴더까지 만든다. 없는 상위 폴더를 주면 결과 파일이 조용히 저장되지 않았다.
+void MakeDirectories(const std::wstring& dir)
+{
+    std::error_code error;
+    std::filesystem::create_directories(dir, error);
+}
 
 // 이음매 없는 값 노이즈 (게임 배경 대신 쓰는 무늬)
 struct NoiseTexture {
@@ -235,7 +243,7 @@ const double kInterval = 1.0 / 30.0;  // 테스트 영상의 프레임 간격 (�
 
 int RunFrameGenSelfTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& outDir)
 {
-    CreateDirectoryW(outDir.c_str(), nullptr);
+    MakeDirectories(outDir);
     NoiseTexture noise;
     auto scenes = MakeScenes(noise);
     FrameGen fg(device, context);
@@ -367,13 +375,13 @@ int RunFrameGenSelfTest(ID3D11Device* device, ID3D11DeviceContext* context, cons
             fg.TestLoadFrame(1, f1.data(), w, h);
             fg.TestLoadFrame(2, f2.data(), w, h);
             // 화면 지도 표본은 실제 프로그램처럼 이웃한 두 프레임의 움직임에서 뽑는다.
-            fg.TestSynthPsnr(0, 1, 2, 0.5f, profile.params, false, kInterval);
-            fg.TestAddFlowSample(profile.params, kInterval);
+            fg.TestSynthPsnr(0, 1, 2, 0.5f, profile.interp.params, false, kInterval);
+            fg.TestAddFlowSample(profile.interp.params, kInterval);
             fg.TestUpdateMapTexture();
-            float current = fg.TestSynthPsnr(0, 2, 1, 0.5f, profile.params, false, kInterval * 2).psnr;
-            float candidate = fg.TestSynthPsnr(0, 2, 1, 0.5f, profile.Candidate(), false, kInterval * 2).psnr;
+            float current = fg.TestSynthPsnr(0, 2, 1, 0.5f, profile.interp.params, false, kInterval * 2).psnr;
+            float candidate = fg.TestSynthPsnr(0, 2, 1, 0.5f, profile.interp.Candidate(), false, kInterval * 2).psnr;
             float blend = fg.TestBlendPsnr(0, 2, 1, 0.5f);
-            profile.AddEvaluation(current, candidate, blend);
+            profile.interp.AddEvaluation(current, candidate, blend, profile.mapSamples);
         }
         profile.UpdateGenre();
         fg.TestUpdateMapTexture();
@@ -389,19 +397,19 @@ int RunFrameGenSelfTest(ID3D11Device* device, ID3D11DeviceContext* context, cons
             fg.TestLoadFrame(1, f1.data(), w, h);
             fg.TestLoadFrame(2, f2.data(), w, h);
             before += fg.TestSynthPsnr(0, 2, 1, 0.5f, defaults, false, kInterval * 2).psnr;
-            after += fg.TestSynthPsnr(0, 2, 1, 0.5f, profile.params, false, kInterval * 2).psnr;
-            withMap += fg.TestSynthPsnr(0, 2, 1, 0.5f, profile.params, true, kInterval * 2).psnr;
+            after += fg.TestSynthPsnr(0, 2, 1, 0.5f, profile.interp.params, false, kInterval * 2).psnr;
+            withMap += fg.TestSynthPsnr(0, 2, 1, 0.5f, profile.interp.params, true, kInterval * 2).psnr;
         }
         before /= kHeldOut;
         after /= kHeldOut;
         withMap /= kHeldOut;
-        printf("%-10s %9.2f %9.2f %9.2f %6d %-8s 칸 %d, 범위 %d, 벌점 %.4f, 허용 %.2f\n", scene.key, before, after, withMap, profile.adoptedCount,
-               kGenreKeys[profile.genre], profile.params.cellPx, profile.params.coarseRadius, profile.params.smoothness, profile.params.blendTol);
+        printf("%-10s %9.2f %9.2f %9.2f %6d %-8s 칸 %d, 범위 %d, 벌점 %.4f, 허용 %.2f\n", scene.key, before, after, withMap, profile.interp.adoptedCount,
+               kGenreKeys[profile.genre], profile.interp.params.cellPx, profile.interp.params.coarseRadius, profile.interp.params.smoothness, profile.interp.params.blendTol);
         fflush(stdout);
-        learn << scene.key << "," << before << "," << after << "," << withMap << "," << profile.adoptedCount << "," << kGenreKeys[profile.genre]
-              << "," << profile.params.cellPx << "," << profile.params.coarseRadius << "," << profile.params.smoothness << ","
-              << profile.params.blendTol << ",";
-        for (size_t i = 0; i < profile.history.size(); i++) learn << (i ? ";" : "") << profile.history[i];
+        learn << scene.key << "," << before << "," << after << "," << withMap << "," << profile.interp.adoptedCount << "," << kGenreKeys[profile.genre]
+              << "," << profile.interp.params.cellPx << "," << profile.interp.params.coarseRadius << "," << profile.interp.params.smoothness << ","
+              << profile.interp.params.blendTol << ",";
+        for (size_t i = 0; i < profile.interp.history.size(); i++) learn << (i ? ";" : "") << profile.interp.history[i];
         learn << "\n";
         fg.SetProfile(nullptr);
     }
@@ -494,7 +502,7 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
         printf("진짜 프레임이 부족합니다: %zu장\n", frames.size());
         return 1;
     }
-    CreateDirectoryW(outDir.c_str(), nullptr);
+    MakeDirectories(outDir);
     FrameGen fg(device, context);
     FgParams defaults;
     // 이웃한 게임 프레임의 간격. 덤프에 캡처 시각이 있으면 그 중앙값을 쓰고, 없으면 60fps 캡처로 본다.
@@ -589,13 +597,13 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
             fg.TestLoadFrame(1, s1.empty() ? frames[k + 1].data() : s1.data(), w, h);
             fg.TestLoadFrame(2, s2.empty() ? frames[k + 2].data() : s2.data(), w, h);
             if (i % 4 == 0) {
-                fg.TestSynthPsnr(0, 1, 2, 0.5f, fresh.params, false, kStep);
-                fg.TestAddFlowSample(fresh.params, kStep);
+                fg.TestSynthPsnr(0, 1, 2, 0.5f, fresh.interp.params, false, kStep);
+                fg.TestAddFlowSample(fresh.interp.params, kStep);
                 fg.TestUpdateMapTexture();
             }
-            float current = fg.TestSynthPsnr(0, 2, 1, 0.5f, fresh.params, false, kStep * 2).psnr;
-            float candidate = fg.TestSynthPsnr(0, 2, 1, 0.5f, fresh.Candidate(), false, kStep * 2).psnr;
-            fresh.AddEvaluation(current, candidate, fg.TestBlendPsnr(0, 2, 1, 0.5f));
+            float current = fg.TestSynthPsnr(0, 2, 1, 0.5f, fresh.interp.params, false, kStep * 2).psnr;
+            float candidate = fg.TestSynthPsnr(0, 2, 1, 0.5f, fresh.interp.Candidate(), false, kStep * 2).psnr;
+            fresh.interp.AddEvaluation(current, candidate, fg.TestBlendPsnr(0, 2, 1, 0.5f), fresh.mapSamples);
         }
         fg.TestUpdateMapTexture();
         double before = 0, after = 0;
@@ -605,16 +613,71 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
             fg.TestLoadFrame(1, frames[k + 1].data(), w, h);
             fg.TestLoadFrame(2, frames[k + 2].data(), w, h);
             before += fg.TestSynthPsnr(0, 2, 1, 0.5f, defaults, false, kStep * 2).psnr;
-            after += fg.TestSynthPsnr(0, 2, 1, 0.5f, fresh.params, false, kStep * 2).psnr;
+            after += fg.TestSynthPsnr(0, 2, 1, 0.5f, fresh.interp.params, false, kStep * 2).psnr;
             n++;
         }
         const char* mixName = mix < 0 ? "없음" : scenes[mix].key;
-        printf("%-12s %8.2f %8.2f %6d 칸 %d, 범위 %d, 벌점 %.4f, 허용 %.2f, 지도 %s\n", mixName, before / n, after / n, fresh.adoptedCount,
-               fresh.params.cellPx, fresh.params.coarseRadius, fresh.params.smoothness, fresh.params.blendTol, fresh.params.useMap ? "사용" : "안 씀");
+        printf("%-12s %8.2f %8.2f %6d 칸 %d, 범위 %d, 벌점 %.4f, 허용 %.2f, 지도 %s\n", mixName, before / n, after / n, fresh.interp.adoptedCount,
+               fresh.interp.params.cellPx, fresh.interp.params.coarseRadius, fresh.interp.params.smoothness, fresh.interp.params.blendTol, fresh.interp.params.useMap ? "사용" : "안 씀");
         fflush(stdout);
-        learnCsv << (mix < 0 ? "none" : scenes[mix].key) << "," << before / n << "," << after / n << "," << fresh.adoptedCount << ","
-                 << fresh.params.cellPx << "," << fresh.params.coarseRadius << "," << fresh.params.smoothness << "," << fresh.params.blendTol << ","
-                 << fresh.params.useMap << "\n";
+        learnCsv << (mix < 0 ? "none" : scenes[mix].key) << "," << before / n << "," << after / n << "," << fresh.interp.adoptedCount << ","
+                 << fresh.interp.params.cellPx << "," << fresh.interp.params.coarseRadius << "," << fresh.interp.params.smoothness << "," << fresh.interp.params.blendTol << ","
+                 << fresh.interp.params.useMap << "\n";
+        fg.SetProfile(nullptr);
+    }
+
+    // 외삽 학습 재현: 게임 프레임 k, k+2로 k+4를 예측한다 (30fps 게임을 외삽하는 것과 같은 간격).
+    // 기준은 프레임 생성이 없을 때와 같은 "앞 프레임 그대로"다. 학습 방식은 실시간의 외삽 채점과 같다.
+    std::ofstream extrapCsv(outDir + L"\\fg_gaptest_extrap_learning.csv");
+    extrapCsv << "mixed_with,hold_db,default_db,learned_db,adopted,cell,radius,smooth,tol,map\n";
+    printf("\n[외삽 학습 재현] 앞 절반으로 학습, 보지 않은 뒤 절반에서 두 장으로 다음 장 예측 (dB)\n%-12s %8s %8s %8s %6s %s\n", "섞은 장면",
+           "멈춤", "기본", "학습", "채택", "학습된 값");
+    for (int mix = -1; mix < (int)scenes.size(); mix++) {
+        GameProfile fresh;
+        fg.SetProfile(&fresh);
+        const int half = (int)frames.size() / 2;
+        const int kIterations = 360;
+        for (int i = 0; i < kIterations; i++) {
+            const int k = (i * 7) % (half - 4);
+            std::vector<uint32_t> s0, s1, s2;
+            if (mix >= 0 && (i / 24) % 2 == 1) {
+                float base = 10.0f + i * 1.3f;
+                s0 = Render(scenes[mix].shade, base, w, h);
+                s1 = Render(scenes[mix].shade, base + 1, w, h);
+                s2 = Render(scenes[mix].shade, base + 2, w, h);
+            }
+            fg.TestLoadFrame(0, s0.empty() ? frames[k].data() : s0.data(), w, h);
+            fg.TestLoadFrame(1, s1.empty() ? frames[k + 2].data() : s1.data(), w, h);
+            fg.TestLoadFrame(2, s2.empty() ? frames[k + 4].data() : s2.data(), w, h);
+            const FgParams current = fresh.extrap.params;
+            const FgParams candidate = fresh.extrap.Candidate();
+            float currentDb = fg.TestSynthPsnr(0, 1, 2, 2.0f, current, false, kStep * 2).psnr;
+            if (i % 4 == 0) {
+                fg.TestAddFlowSample(current, kStep * 2);
+                fg.TestUpdateMapTexture();
+            }
+            float candidateDb = fg.TestSynthPsnr(0, 1, 2, 2.0f, candidate, false, kStep * 2).psnr;
+            fresh.extrap.AddEvaluation(currentDb, candidateDb, fg.TestHoldPsnr(1, 2), fresh.mapSamples);
+        }
+        fg.TestUpdateMapTexture();
+        double hold = 0, before = 0, after = 0;
+        int n = 0;
+        for (int k = half; k + 4 < (int)frames.size(); k++) {
+            fg.TestLoadFrame(0, frames[k].data(), w, h);
+            fg.TestLoadFrame(1, frames[k + 2].data(), w, h);
+            fg.TestLoadFrame(2, frames[k + 4].data(), w, h);
+            hold += fg.TestHoldPsnr(1, 2);
+            before += fg.TestSynthPsnr(0, 1, 2, 2.0f, defaults, false, kStep * 2).psnr;
+            after += fg.TestSynthPsnr(0, 1, 2, 2.0f, fresh.extrap.params, false, kStep * 2).psnr;
+            n++;
+        }
+        const FgParams& p = fresh.extrap.params;
+        const char* mixName = mix < 0 ? "없음" : scenes[mix].key;
+        printf("%-12s %8.2f %8.2f %8.2f %6d 칸 %d, 범위 %d, 벌점 %.4f, 허용 %.2f, 지도 %s\n", mixName, hold / n, before / n, after / n,
+               fresh.extrap.adoptedCount, p.cellPx, p.coarseRadius, p.smoothness, p.blendTol, p.useMap ? "사용" : "안 씀");
+        fflush(stdout);
+        extrapCsv << (mix < 0 ? "none" : scenes[mix].key) << "," << hold / n << "," << before / n << "," << after / n << "," << fresh.extrap.adoptedCount
+                  << "," << p.cellPx << "," << p.coarseRadius << "," << p.smoothness << "," << p.blendTol << "," << p.useMap << "\n";
         fg.SetProfile(nullptr);
     }
 
@@ -630,11 +693,11 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
     fg.SetProfile(&profile);
     fg.TestUpdateMapTexture();
     const bool mapReady = profile.mapSamples >= 20;
-    FgParams learned = profile.params;
+    FgParams learned = profile.interp.params;
     learned.useMap = false;
     printf("\n[학습] 칸 %d, 범위 %d, 벌점 %.4f, 허용 %.2f, 지도 %s (표본 %d, 채점 %d회, 채택 %d회)\n", learned.cellPx, learned.coarseRadius,
-           learned.smoothness, learned.blendTol, profile.params.useMap ? "사용" : "안 씀", profile.mapSamples, profile.evalCount,
-           profile.adoptedCount);
+           learned.smoothness, learned.blendTol, profile.interp.params.useMap ? "사용" : "안 씀", profile.mapSamples, profile.interp.evalCount,
+           profile.interp.adoptedCount);
     printf("%-6s %-6s %9s %10s %12s %12s\n", "간격", "시점", "기본", "기본+지도", "학습(지도X)", "학습+지도");
     std::ofstream profileCsv(outDir + L"\\fg_gaptest_profile.csv");
     profileCsv << "gap,t,default_db,default_map_db,learned_db,learned_map_db\n";
@@ -666,7 +729,7 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
 
 int RunRifeBench(const std::wstring& outDir)
 {
-    CreateDirectoryW(outDir.c_str(), nullptr);
+    MakeDirectories(outDir);
     RifeEngine engine(RifeEngine::DefaultDirectory());
     std::ofstream csv(outDir + L"\\rife_bench.csv");
     csv << "w,h,runs,total_ms,run_ms,min_run_ms\n";

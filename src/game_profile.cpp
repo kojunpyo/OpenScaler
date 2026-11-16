@@ -89,10 +89,16 @@ void WriteArray(std::ostringstream& os, const char* key, const std::vector<float
 
 GameProfile::GameProfile() : map(kMapW * kMapH)
 {
-    NextCandidate();
+    interp.Start(mapSamples);
+    extrap.Start(mapSamples);
 }
 
-void GameProfile::NextCandidate()
+void FgLearner::Start(int mapSamples)
+{
+    NextCandidate(mapSamples);
+}
+
+void FgLearner::NextCandidate(int mapSamples)
 {
     m_pairs = 0;
     m_deltas.clear();
@@ -124,21 +130,21 @@ void GameProfile::NextCandidate()
     }
 }
 
-void GameProfile::AddEvaluation(float currentDb, float candidateDb, float blendDb)
+void FgLearner::AddEvaluation(float currentDb, float candidateDb, float baselineDb, int mapSamples)
 {
     evalCount++;
     bestPsnr = bestPsnr <= 0 ? currentDb : bestPsnr * 0.9f + currentDb * 0.1f;
 
     m_sumCurrent += currentDb;
-    m_sumBlend += blendDb;
+    m_sumBaseline += baselineDb;
     if (++m_historyCount >= kEvalsPerHistoryPoint) {
         history.push_back(m_sumCurrent / m_historyCount);
-        baseline.push_back(m_sumBlend / m_historyCount);
+        baseline.push_back(m_sumBaseline / m_historyCount);
         if (history.size() > kMaxHistory) {
             history.erase(history.begin());
             baseline.erase(baseline.begin());
         }
-        m_sumCurrent = m_sumBlend = 0;
+        m_sumCurrent = m_sumBaseline = 0;
         m_historyCount = 0;
     }
 
@@ -166,7 +172,7 @@ void GameProfile::AddEvaluation(float currentDb, float candidateDb, float blendD
         params = m_candidate;
         adoptedCount++;
     }
-    NextCandidate();
+    NextCandidate(mapSamples);
 }
 
 void GameProfile::AddFlowSample(const float* flow, int gridW, int gridH, int rowPitchFloats, double interval)
@@ -288,17 +294,22 @@ bool GameProfile::Save(const std::wstring& dir) const
     os << "{\n";
     os << "  \"version\": 1,\n";
     os << "  \"genre\": " << genre << ",\n";
-    os << "  \"cellPx\": " << params.cellPx << ",\n";
-    os << "  \"coarseRadius\": " << params.coarseRadius << ",\n";
-    os << "  \"smoothness\": " << params.smoothness << ",\n";
-    os << "  \"blendTol\": " << params.blendTol << ",\n";
-    os << "  \"useMap\": " << (params.useMap ? 1 : 0) << ",\n";
-    os << "  \"evalCount\": " << evalCount << ",\n";
-    os << "  \"adoptedCount\": " << adoptedCount << ",\n";
-    os << "  \"bestPsnr\": " << bestPsnr << ",\n";
+    // 보간 학습은 예전 파일과 같은 이름으로, 외삽 학습은 x_를 붙여 쓴다.
+    for (int k = 0; k < 2; k++) {
+        const FgLearner& l = k == 0 ? interp : extrap;
+        const std::string pre = k == 0 ? "" : "x_";
+        os << "  \"" << pre << "cellPx\": " << l.params.cellPx << ",\n";
+        os << "  \"" << pre << "coarseRadius\": " << l.params.coarseRadius << ",\n";
+        os << "  \"" << pre << "smoothness\": " << l.params.smoothness << ",\n";
+        os << "  \"" << pre << "blendTol\": " << l.params.blendTol << ",\n";
+        os << "  \"" << pre << "useMap\": " << (l.params.useMap ? 1 : 0) << ",\n";
+        os << "  \"" << pre << "evalCount\": " << l.evalCount << ",\n";
+        os << "  \"" << pre << "adoptedCount\": " << l.adoptedCount << ",\n";
+        os << "  \"" << pre << "bestPsnr\": " << l.bestPsnr << ",\n";
+        WriteArray(os, (pre + "history").c_str(), l.history);
+        WriteArray(os, (pre + "baseline").c_str(), l.baseline);
+    }
     os << "  \"mapSamples\": " << mapSamples << ",\n";
-    WriteArray(os, "history", history);
-    WriteArray(os, "baseline", baseline);
     WriteArray(os, "map", mapValues, true);
     os << "}\n";
 
@@ -330,19 +341,24 @@ bool GameProfile::Load(const std::wstring& path)
             if (std::abs(options[i] - v) < std::abs(best - v)) best = options[i];
         return best;
     };
-    params.cellPx = nearestInt(ReadNumber(text, "cellPx", params.cellPx), kCellOptions, kOptionsPerAxis);
-    params.coarseRadius = nearestInt(ReadNumber(text, "coarseRadius", params.coarseRadius), kRadiusOptions, kOptionsPerAxis);
-    params.smoothness = nearestFloat(ReadNumber(text, "smoothness", params.smoothness), kSmoothOptions, kOptionsPerAxis);
-    params.blendTol = nearestFloat(ReadNumber(text, "blendTol", params.blendTol), kTolOptions, kOptionsPerAxis);
-    params.useMap = ReadNumber(text, "useMap", 0) != 0;
+    for (int k = 0; k < 2; k++) {
+        FgLearner& l = k == 0 ? interp : extrap;
+        const std::string pre = k == 0 ? "" : "x_";
+        auto key = [&](const char* n) { return pre + n; };
+        l.params.cellPx = nearestInt(ReadNumber(text, key("cellPx").c_str(), l.params.cellPx), kCellOptions, kOptionsPerAxis);
+        l.params.coarseRadius = nearestInt(ReadNumber(text, key("coarseRadius").c_str(), l.params.coarseRadius), kRadiusOptions, kOptionsPerAxis);
+        l.params.smoothness = nearestFloat(ReadNumber(text, key("smoothness").c_str(), l.params.smoothness), kSmoothOptions, kOptionsPerAxis);
+        l.params.blendTol = nearestFloat(ReadNumber(text, key("blendTol").c_str(), l.params.blendTol), kTolOptions, kOptionsPerAxis);
+        l.params.useMap = ReadNumber(text, key("useMap").c_str(), 0) != 0;
+        l.evalCount = std::max(0, (int)ReadNumber(text, key("evalCount").c_str(), 0));
+        l.adoptedCount = std::max(0, (int)ReadNumber(text, key("adoptedCount").c_str(), 0));
+        l.bestPsnr = (float)ReadNumber(text, key("bestPsnr").c_str(), 0);
+        l.history = ReadArray(text, key("history").c_str());
+        l.baseline = ReadArray(text, key("baseline").c_str());
+        l.baseline.resize(l.history.size());
+    }
     genre = std::clamp((int)ReadNumber(text, "genre", genre), 0, GENRE_COUNT - 1);
-    evalCount = std::max(0, (int)ReadNumber(text, "evalCount", 0));
-    adoptedCount = std::max(0, (int)ReadNumber(text, "adoptedCount", 0));
-    bestPsnr = (float)ReadNumber(text, "bestPsnr", 0);
     mapSamples = std::max(0, (int)ReadNumber(text, "mapSamples", 0));
-    history = ReadArray(text, "history");
-    baseline = ReadArray(text, "baseline");
-    baseline.resize(history.size());
 
     std::vector<float> mapValues = ReadArray(text, "map");
     if (mapValues.size() == map.size() * 5) {
@@ -354,7 +370,8 @@ bool GameProfile::Load(const std::wstring& path)
             map[i].coherence = mapValues[i * 5 + 4];
         }
     }
-    NextCandidate();
+    interp.Start(mapSamples);
+    extrap.Start(mapSamples);
     return true;
 }
 
