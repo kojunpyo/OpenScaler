@@ -469,7 +469,7 @@ bool LoadBmp(const std::wstring& path, std::vector<uint32_t>& rgba, int& w, int&
 int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& dumpDir, const std::wstring& outDir,
                        const std::wstring& profilePath)
 {
-    // 슬로모션 덤프의 진짜 프레임만 쓴다. 이웃한 진짜 프레임은 60fps 캡처의 1칸 간격이다.
+    // 슬로모션 덤프의 진짜 프레임만 쓴다. 이웃한 진짜 프레임의 간격은 real_times.txt에서 읽는다 (없으면 60fps로 본다).
     std::vector<std::vector<uint32_t>> frames;
     int w = 0, h = 0;
     WIN32_FIND_DATAW fd;
@@ -497,14 +497,27 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
     CreateDirectoryW(outDir.c_str(), nullptr);
     FrameGen fg(device, context);
     FgParams defaults;
-    const double kStep = 1.0 / 60.0;
+    // 이웃한 게임 프레임의 간격. 덤프에 캡처 시각이 있으면 그 중앙값을 쓰고, 없으면 60fps 캡처로 본다.
+    // 게임 fps를 제한한 채 녹화하면 이웃한 프레임도 33ms처럼 벌어져 있어, "2칸"이 더 느린 게임에 해당한다.
+    double kStep = 1.0 / 60.0;
+    {
+        std::ifstream timesFile(dumpDir + L"\\real_times.txt");
+        std::vector<double> times, gaps;
+        for (double v; timesFile >> v;) times.push_back(v);
+        for (size_t i = 1; i < times.size(); i++) gaps.push_back(times[i] - times[i - 1]);
+        if (gaps.size() >= 4) {
+            std::nth_element(gaps.begin(), gaps.begin() + gaps.size() / 2, gaps.end());
+            kStep = gaps[gaps.size() / 2];
+        }
+    }
+    printf("이웃한 게임 프레임 간격: %.1f ms\n", kStep * 1000);
 
     // 진짜 프레임 k와 k+gap으로 가운데 프레임을 만들고 실제 프레임과 비교한다.
     // 긴 간격 설정: 실시간처럼 1칸을 보통 간격으로 보고, 그보다 훨씬 긴 쌍에만 넓은 칸과 낮은 벌점을 쓴다.
     printf("진짜 프레임 %zu장 (%dx%d)\n%-6s %-6s %8s %9s %9s %10s %9s\n", frames.size(), w, h, "간격", "시점", "멈춤", "블렌딩", "블록",
            "긴 간격 설정", "RIFE");
     std::ofstream csv(outDir + L"\\fg_gaptest.csv");
-    csv << "gap,t,samples,hold_db,blend_db,block_db,block_longgap_db,rife_db\n";
+    csv << "gap,t,samples,hold_db,blend_db,block_db,block_longgap_db,rife_db,frame_ms\n";
     bool rifeOk = true;
     const struct { int gap, part; } cases[] = { { 2, 1 }, { 3, 1 }, { 4, 2 }, { 4, 1 }, { 6, 3 }, { 8, 4 } };
     for (auto& c : cases) {
@@ -549,7 +562,7 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
         printf("%-6d %-6.2f %8.2f %9.2f %9.2f %10.2f %9.2f\n", c.gap, t, hold * k, blend * k, block * k, blockLong * k, rife * rk);
         fflush(stdout);
         csv << c.gap << "," << t << "," << n << "," << hold * k << "," << blend * k << "," << block * k << "," << blockLong * k << ","
-            << rife * rk << "\n";
+            << rife * rk << "," << kStep * 1000 << "\n";
     }
     // 학습 재현: 앞 절반의 프레임으로 실제 프로그램과 같은 순서로 학습하고, 보지 않은 뒤 절반에서 기본값과 비교한다.
     // 다른 화면이 섞인 경우: 게임 프레임과 계산으로 만든 장면을 24회씩 번갈아 채점한다 (메뉴, 결과 화면 대신).

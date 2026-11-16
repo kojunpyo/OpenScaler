@@ -1263,6 +1263,13 @@ static void RenderFrame()
                             swprintf_s(name, L"\\frame_%03d_%ls.bmp", i, frames[i].generated ? L"gen" : L"real");
                             SaveFrameBmp(g_slowMo.dumpDir + name, g_frameGen->SlowMoReadFrame(i), g_slowMo.w, g_slowMo.h);
                         }
+                        // 게임 프레임의 캡처 시각: --fg-gaptest가 녹화의 실제 프레임 간격을 알 수 있게 한다.
+                        FILE* times = nullptr;
+                        if (_wfopen_s(&times, (g_slowMo.dumpDir + L"\\real_times.txt").c_str(), L"w") == 0 && times) {
+                            for (int i = 0; i < g_frameGen->SlowMoRealCount(); i++)
+                                fprintf(times, "%.6f\n", g_frameGen->SlowMoRealTime(i) - g_frameGen->SlowMoRealTime(0));
+                            fclose(times);
+                        }
                     }
                     g_slowMo.index = g_slowMo.vsyncs = g_slowMo.loopWait = 0;
                     // 주사율이 목표 fps보다 높으면 한 장을 더 오래 보여 줘 실제 시간보다 빨라지지 않게 한다.

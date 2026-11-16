@@ -90,6 +90,7 @@ public:
     const std::vector<SlowMoFrame>& SlowMoFrames() const { return m_slowMoFrames; }
     int SlowMoTotal() const { return m_slowMoTotal; }
     int SlowMoRealCount() const { return m_slowMoRecorded; }
+    double SlowMoRealTime(int i) const { return m_slowMoTimes[i]; }  // 녹화한 게임 프레임의 캡처 시각 (초)
     int SlowMoRifeHeight() const { return m_slowMoRifeHeight; }  // RIFE로 만들었으면 입력 높이, 아니면 0
     bool SlowMoRifeLoading() const { return m_slowMoRifeLoading; }
     std::vector<uint32_t> SlowMoReadFrame(int index);  // RGBA로 읽어 온다 (테스트용)

@@ -2,7 +2,8 @@
   [Parameter(Mandatory = $true)][string]$Target,   # 게임 창 제목의 일부 (예: "Minecraft")
   [int]$Seconds = 30,                               # 방식마다 기록할 시간
   [string]$Exe = "",                                # OpenScaler.exe 경로. 비우면 이 스크립트 옆, 그다음 현재 폴더에서 찾는다
-  [string]$Out = ""                                 # 결과 폴더. 비우면 devicecheck_날짜시각
+  [string]$Out = "",                                # 결과 폴더. 비우면 devicecheck_날짜시각
+  [switch]$NoPause                                  # 화질 측정 녹화 전에 묻지 않는다 (자동 실행용)
 )
 # 다른 기기(고주사율 모니터)에서 프레임 생성을 잴 기록을 모은다. 파이썬 없이 돌아가고, 분석은 나중에 한다.
 #   python -I tools/test/fgtiming.py 결과폴더/fg_rife.csv         (실시간 등급)
@@ -68,6 +69,12 @@ foreach ($m in $modes) {
 }
 
 # 4. 화질 측정용 슬로모션 덤프 (RIFE, 2초). 덤프의 게임 프레임으로 나중에 --fg-gaptest를 돌린다.
+# 게임 fps를 제한한 채 녹화하면 이웃한 프레임 간격이 벌어져 촘촘한 간격을 잴 수 없으므로, 녹화 전에 제한을 풀게 한다.
+if (-not $NoPause) {
+  Write-Host ""
+  Write-Host "[5/5] 화질 측정 녹화 전에 게임의 최대 fps 제한을 풀어 주세요 (가능하면 주사율 이상). 준비되면 Enter" -ForegroundColor Yellow
+  Read-Host | Out-Null
+}
 Countdown "[5/5] 화질 측정 녹화: 5초 뒤부터 2초 동안 녹화합니다. 화면이 움직이도록 계속 조작하세요"
 Run-OpenScaler "--no-gui --target `"$Target`" --fg --fg-rife --slowmo-auto 5 --slowmo-seconds 2 --slowmo-dump `"$Out\dump`" --duration 40" 70
 

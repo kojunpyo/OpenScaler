@@ -24,7 +24,10 @@ columns = [("blend_db", "단순 섞기"), ("block_db", "블록 매칭"), ("block
 print("오차 감소율 기준: 85% 이상 좋음, 65% 이상 보통, 40% 이상 아쉬움, 그 아래 나쁨 (단순 섞기가 보통 30~40%)")
 for row in rows:
     hold = float(row["hold_db"])
-    print(f"\n{row['gap']}칸, 시점 {float(row['t']):.2f} (게임 {60 / int(row['gap']):.0f}fps를 60fps로 채우는 것과 같은 간격)")
+    # 녹화의 이웃한 프레임 간격(frame_ms)이 있으면 그것으로, 없으면 60fps 녹화로 보고 게임 fps로 바꿔 보여 준다.
+    frame_ms = float(row.get("frame_ms") or 1000 / 60)
+    pair_ms = frame_ms * int(row["gap"])
+    print(f"\n{row['gap']}칸, 시점 {float(row['t']):.2f}: 앞뒤 프레임 사이 {pair_ms:.0f}ms (게임 {1000 / pair_ms:.0f}fps를 채우는 조건)")
     print(f"  {'멈춤 (생성 없음)':<14}{hold:6.2f}dB  픽셀 오차 {rmse(hold):5.1f}단계")
     for key, name in columns:
         if key not in row or not row[key] or float(row[key]) == 0:

@@ -18,7 +18,18 @@ const double kPauseGap = 0.25;       // 프레임 간격이 이보다 길면 게
 const double kEvalPeriod = 1.0;      // 채점 주기 (초)
 const double kSamplePeriod = 0.25;   // 화면 지도 표본 주기 (초)
 const double kDisplayMargin = 0.002; // 프레임 도착 지연에 대비해 표시를 조금 더 늦춘다 (초)
-const float kMaxExtrapolate = 1.75f; // 외삽은 프레임 간격의 75%까지만 앞서 나간다
+// 외삽이 마지막 게임 프레임보다 앞서 나갈 수 있는 시간 (보통 프레임 간격의 배수).
+// 예전에는 바로 앞 두 장의 간격의 75%까지였는데, 게임 프레임이 16ms 만에 두 장 붙어 온 뒤 50ms 비면
+// 12ms만 나가고 멈췄다가 다음 프레임에서 건너뛰었다 (마인크래프트 30fps에서 멈춤 3.9%, 2칸 넘는 건너뜀 분당 141번).
+const double kExtrapolateAhead = 1.0;
+const double kMaxExtrapolateT = 4.0;   // 아주 짧은 쌍의 작은 움직임을 지나치게 늘리지 않는다
+
+// 이번 쌍의 간격(pairGap) 단위로 나타낸 외삽 시점의 상한
+double ExtrapolateLimit(double pairGap, double typical)
+{
+    if (pairGap <= 0 || typical <= 0) return 1.75;
+    return std::clamp(1.0 + kExtrapolateAhead * typical / pairGap, 1.0, kMaxExtrapolateT);
+}
 const float kZeroBias = 0.002f;
 const int kWideSearchLevel = 3;      // 1/8 영상에서 넓게 찾는다
 const int kWideSearchRadius = 16;    // 원본 기준 약 128픽셀
@@ -854,7 +865,7 @@ ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
     m_held = showA->colorSrv.get();
 
     float t = (float)((m_clock - showA->time) / (showB->time - showA->time));
-    if (extrapolate) t = std::clamp(t, 1.0f, kMaxExtrapolate);
+    if (extrapolate) t = std::clamp(t, 1.0f, (float)ExtrapolateLimit(showB->time - showA->time, m_interval));
     else t = std::clamp(t, 0.0f, 1.0f);
     if (options.multiplier >= 2) t = std::floor(t * options.multiplier) / options.multiplier;
     m_stats.displayT = t;
@@ -1031,7 +1042,7 @@ bool FrameGen::SlowMoGenerateStep(const FgOptions& options)
             m_slowMoGenerated.push_back(MakeTarget(m_w, m_h, DXGI_FORMAT_R8G8B8A8_UNORM, true));
             const Target& out = m_slowMoGenerated.back();
             shown.srv = out.srv.get();
-            shown.t = (float)std::min(1.0 + gap * j / count / prevGap, (double)kMaxExtrapolate);
+            shown.t = (float)std::min(1.0 + gap * j / count / prevGap, ExtrapolateLimit(prevGap, m_slowMoTypical));
             shown.generated = true;
             Synthesize(a, b, set, shown.t, params, out.uav.get());
             m_slowMoFrames.push_back(shown);
