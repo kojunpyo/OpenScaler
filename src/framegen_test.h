@@ -13,6 +13,9 @@ int RunFrameGenSelfTest(ID3D11Device* device, ID3D11DeviceContext* context, cons
 int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& dumpDir, const std::wstring& outDir,
                        const std::wstring& profilePath);
 
+// 프레임 생성 영역 시험: 영역 안은 그 부분만 넣었을 때와 같고, 영역 밖은 게임 프레임 그대로인지 확인한다.
+int RunFrameGenRegionTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& outDir);
+
 // RIFE 신경망 시간만 입력 크기별로 잰다. 화면과 캡처를 쓰지 않는다.
 int RunRifeBench(const std::wstring& outDir);
 

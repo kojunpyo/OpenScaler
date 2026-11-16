@@ -93,6 +93,18 @@ GameProfile::GameProfile() : map(kMapW * kMapH)
     extrap.Start(mapSamples);
 }
 
+void GameProfile::SetRegion(float x, float y, float w, float h)
+{
+    if (x == regionX && y == regionY && w == regionW && h == regionH) return;
+    regionX = x;
+    regionY = y;
+    regionW = w;
+    regionH = h;
+    map.assign(map.size(), MapCell{});
+    mapSamples = 0;
+    genre = GENRE_GENERAL;
+}
+
 void FgLearner::Start(int mapSamples)
 {
     NextCandidate(mapSamples);
@@ -309,6 +321,10 @@ bool GameProfile::Save(const std::wstring& dir) const
         WriteArray(os, (pre + "history").c_str(), l.history);
         WriteArray(os, (pre + "baseline").c_str(), l.baseline);
     }
+    os << "  \"regionX\": " << regionX << ",\n";
+    os << "  \"regionY\": " << regionY << ",\n";
+    os << "  \"regionW\": " << regionW << ",\n";
+    os << "  \"regionH\": " << regionH << ",\n";
     os << "  \"mapSamples\": " << mapSamples << ",\n";
     WriteArray(os, "map", mapValues, true);
     os << "}\n";
@@ -359,6 +375,10 @@ bool GameProfile::Load(const std::wstring& path)
     }
     genre = std::clamp((int)ReadNumber(text, "genre", genre), 0, GENRE_COUNT - 1);
     mapSamples = std::max(0, (int)ReadNumber(text, "mapSamples", 0));
+    regionX = std::clamp((float)ReadNumber(text, "regionX", 0), 0.0f, 1.0f);
+    regionY = std::clamp((float)ReadNumber(text, "regionY", 0), 0.0f, 1.0f);
+    regionW = std::clamp((float)ReadNumber(text, "regionW", 0), 0.0f, 1.0f - regionX);
+    regionH = std::clamp((float)ReadNumber(text, "regionH", 0), 0.0f, 1.0f - regionY);
 
     std::vector<float> mapValues = ReadArray(text, "map");
     if (mapValues.size() == map.size() * 5) {

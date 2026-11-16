@@ -74,6 +74,13 @@ struct GameProfile {
     std::vector<MapCell> map;      // kMapW * kMapH
     int mapSamples = 0;
 
+    // 프레임 생성 영역 (게임 화면 크기에 대한 비율 0~1). 너비가 0이면 화면 전체에 만든다.
+    // 화면 지도와 학습은 이 영역 안에서만 이루어진다.
+    float regionX = 0, regionY = 0, regionW = 0, regionH = 0;
+    bool HasRegion() const { return regionW > 0 && regionH > 0; }
+    // 영역을 바꾼다. 화면 지도의 칸 위치가 달라지므로 지도는 처음부터 다시 모은다.
+    void SetRegion(float x, float y, float w, float h);
+
     GameProfile();
 
     // 화면 지도 --------------------------------------------------------------

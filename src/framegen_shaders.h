@@ -544,4 +544,20 @@ void CSMse(uint3 id : SV_DispatchThreadID)
     }
     mseOut[id.xy] = count > 0 ? sum / count : 0;
 }
+
+// ---------------------------------------------------------------------------
+// 영역 붙이기: 프레임 생성 영역(gridSize 위치, lvlSize 크기)의 결과를 화면 전체 게임 프레임 위에 붙인다.
+// ---------------------------------------------------------------------------
+
+Texture2D<float4> pasteFull : register(t0);
+Texture2D<float4> pasteRegion : register(t1);
+
+[numthreads(8, 8, 1)]
+void CSPaste(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= (uint2)srcSize)) return;
+    int2 p = int2(id.xy) - gridSize;
+    bool inside = all(p >= 0) && all(p < lvlSize);
+    colorOut[id.xy] = inside ? pasteRegion.Load(int3(p, 0)) : pasteFull.Load(int3(id.xy, 0));
+}
 )";

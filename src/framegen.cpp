@@ -15,6 +15,7 @@ using winrt::check_hresult;
 namespace {
 
 const double kPauseGap = 0.25;       // 프레임 간격이 이보다 길면 게임이 멈췄던 것으로 보고 보간하지 않는다
+const UINT kMinRegion = 64;          // 이보다 작은 영역은 움직임을 찾기 어려워 화면 전체로 만든다
 const double kEvalPeriod = 1.0;      // 채점 주기 (초)
 const double kSamplePeriod = 0.25;   // 화면 지도 표본 주기 (초)
 const double kDisplayMargin = 0.002; // 프레임 도착 지연에 대비해 표시를 조금 더 늦춘다 (초)
@@ -101,6 +102,7 @@ FrameGen::FrameGen(ID3D11Device* device, ID3D11DeviceContext* context)
     m_csMse = CreateCs("CSMse");
     m_csResize = CreateCs("CSResize");
     m_csRifeCompose = CreateCs("CSRifeCompose");
+    m_csPaste = CreateCs("CSPaste");
 
     D3D11_BUFFER_DESC bd = {};
     bd.ByteWidth = sizeof(Cb);
@@ -172,12 +174,23 @@ FrameGen::Target FrameGen::MakeTarget(UINT w, UINT h, DXGI_FORMAT format, bool u
     return target;
 }
 
-void FrameGen::EnsureFrames(UINT w, UINT h)
+void FrameGen::EnsureFrames(UINT fullW, UINT fullH, UINT rx, UINT ry, UINT rw, UINT rh)
 {
-    if (m_w == w && m_h == h && m_frames[0].color) return;
+    const bool region = rw > 0 && rh > 0 && (rw < fullW || rh < fullH);
+    if (!region) rx = ry = 0;
+    const UINT w = region ? rw : fullW;
+    const UINT h = region ? rh : fullH;
+    if (m_w == w && m_h == h && m_fullW == fullW && m_fullH == fullH && m_region == region && m_regionX == rx && m_regionY == ry &&
+        m_frames[0].color)
+        return;
     Reset();
     m_w = w;
     m_h = h;
+    m_fullW = fullW;
+    m_fullH = fullH;
+    m_region = region;
+    m_regionX = rx;
+    m_regionY = ry;
     m_flowSets.clear();
     m_flowSets.reserve(8);  // 포인터가 바뀌지 않게 미리 잡아 둔다 (칸 크기는 3가지뿐)
 
@@ -189,6 +202,13 @@ void FrameGen::EnsureFrames(UINT w, UINT h)
         Target color = MakeTarget(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, false);
         f.color = color.tex;
         f.colorSrv = color.srv;
+        f.full = nullptr;
+        f.fullSrv = nullptr;
+        if (region) {
+            Target full = MakeTarget(fullW, fullH, DXGI_FORMAT_B8G8R8A8_UNORM, false);
+            f.full = full.tex;
+            f.fullSrv = full.srv;
+        }
         for (int i = 0; i < kLevels; i++) {
             Target luma = MakeTarget(m_lvlW[i], m_lvlH[i], DXGI_FORMAT_R8_UNORM, true);
             f.lumaSrv[i] = luma.srv;
@@ -198,6 +218,7 @@ void FrameGen::EnsureFrames(UINT w, UINT h)
     // 합성 결과. UAV는 BGRA를 지원하지 않지만 셰이더에서는 채널 순서가 같게 보인다.
     m_output = MakeTarget(w, h, DXGI_FORMAT_R8G8B8A8_UNORM, true);
     m_evalOutput = MakeTarget(w, h, DXGI_FORMAT_R8G8B8A8_UNORM, true);
+    m_regionOutput = region ? MakeTarget(fullW, fullH, DXGI_FORMAT_R8G8B8A8_UNORM, true) : Target{};
     m_mse = MakeTarget((w + 7) / 8, (h + 7) / 8, DXGI_FORMAT_R32_FLOAT, true);
     m_duplicateMse = MakeTarget((m_lvlW[kDuplicateLevel] + 7) / 8, (m_lvlH[kDuplicateLevel] + 7) / 8, DXGI_FORMAT_R32_FLOAT, true);
     m_stagingPool.clear();
@@ -645,16 +666,28 @@ bool FrameGen::IsDuplicate(const Frame& a, const Frame& b)
 
 void FrameGen::PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, const FgOptions& options)
 {
-    EnsureFrames(w, h);
+    // 영역은 화면 안으로 자른다. 너무 작으면 움직임을 찾을 수 없으므로 화면 전체로 되돌린다.
+    UINT rx = (UINT)std::clamp(options.regionX, 0, (int)w), ry = (UINT)std::clamp(options.regionY, 0, (int)h);
+    UINT rw = (UINT)std::clamp(options.regionW, 0, (int)(w - rx)), rh = (UINT)std::clamp(options.regionH, 0, (int)(h - ry));
+    if (rw < kMinRegion || rh < kMinRegion) rw = rh = 0;
+    EnsureFrames(w, h, rx, ry, rw, rh);
 
     // 빈 슬롯에 받아 보고, 앞 프레임과 같으면 버린다.
     Frame& incoming = m_frames[kFrames - 1];
-    m_ctx->CopyResource(incoming.color.get(), source);
+    if (m_region) {
+        const D3D11_BOX box = { m_regionX, m_regionY, 0, m_regionX + m_w, m_regionY + m_h, 1 };
+        m_ctx->CopySubresourceRegion(incoming.color.get(), 0, 0, 0, 0, source, 0, &box);
+    } else {
+        m_ctx->CopyResource(incoming.color.get(), source);
+    }
     BuildPyramid(incoming);
     if (m_count > 0 && IsDuplicate(incoming, m_frames[0])) {
+        // 영역 안이 같아도 영역 밖은 바뀌었을 수 있으므로 최신 프레임의 전체 화면은 새것으로 바꿔 둔다.
+        if (m_region) m_ctx->CopyResource(m_frames[0].full.get(), source);
         m_stats.duplicates++;
         return;
     }
+    if (m_region) m_ctx->CopyResource(incoming.full.get(), source);
 
     std::rotate(m_frames.begin(), m_frames.end() - 1, m_frames.end());
     Frame& f = m_frames[0];
@@ -826,7 +859,35 @@ const FrameGen::RifeFlow* FrameGen::FindRife(long long seq) const
     return nullptr;
 }
 
+ID3D11ShaderResourceView* FrameGen::FullOf(ID3D11ShaderResourceView* srv) const
+{
+    if (!m_region || !srv) return srv;
+    for (const Frame& f : m_frames)
+        if (f.colorSrv.get() == srv) return f.fullSrv.get();
+    return srv;
+}
+
 ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
+{
+    m_outside = nullptr;
+    ID3D11ShaderResourceView* result = RenderRegion(now, options);
+    if (!m_region || !result) return result;
+    // 게임 프레임을 그대로 보여 주는 경우에는 그 프레임의 전체 화면을 쓴다.
+    if (ID3D11ShaderResourceView* full = FullOf(result); full != result) return full;
+    // 만든 영역을 영역 밖 게임 프레임 위에 붙인다.
+    const Frame* outside = m_outside ? m_outside : &m_frames[0];
+    Cb cb = {};
+    cb.srcSize[0] = (int)m_fullW;
+    cb.srcSize[1] = (int)m_fullH;
+    cb.gridSize[0] = (int)m_regionX;
+    cb.gridSize[1] = (int)m_regionY;
+    cb.lvlSize[0] = (int)m_w;
+    cb.lvlSize[1] = (int)m_h;
+    Run(m_csPaste.get(), { outside->fullSrv.get(), result }, m_regionOutput.uav.get(), cb, (m_fullW + 7) / 8, (m_fullH + 7) / 8);
+    return m_regionOutput.srv.get();
+}
+
+ID3D11ShaderResourceView* FrameGen::RenderRegion(double now, const FgOptions& options)
 {
     PollReadbacks();
     TimerPoll(m_timerEstimate);
@@ -898,6 +959,8 @@ ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
     if (options.multiplier >= 2) t = std::floor(t * options.multiplier) / options.multiplier;
     m_stats.displayT = t;
     m_stats.contentTime = showA->time + (showB->time - showA->time) * t;
+    // 영역 밖은 표시 시점에 가까운 게임 프레임을 보여 준다 (영역 안과 시간이 크게 어긋나지 않게).
+    m_outside = extrapolate || t >= 0.5f ? showB : showA;
 
     if (options.visualize) {
         Project(*m_liveFlow, std::min(t, 1.0f));
@@ -933,7 +996,7 @@ ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
 
 ID3D11ShaderResourceView* FrameGen::HeldFrame() const
 {
-    return m_held;
+    return FullOf(m_held);
 }
 
 // ---------------------------------------------------------------------------
@@ -1235,6 +1298,29 @@ std::vector<uint32_t> FrameGen::TestReadOutput()
         memcpy(&out[(size_t)y * td.Width], static_cast<const char*>(mapped.pData) + (size_t)y * mapped.RowPitch, td.Width * 4);
     m_ctx->Unmap(staging.get(), 0);
     RecycleStaging(staging);
+    return out;
+}
+
+std::vector<uint32_t> FrameGen::TestReadSrv(ID3D11ShaderResourceView* srv, UINT& w, UINT& h)
+{
+    com_ptr<ID3D11Resource> resource;
+    srv->GetResource(resource.put());
+    auto tex = resource.as<ID3D11Texture2D>();
+    D3D11_TEXTURE2D_DESC td;
+    tex->GetDesc(&td);
+    w = td.Width;
+    h = td.Height;
+    auto staging = GetStaging(td.Width, td.Height, td.Format);
+    m_ctx->CopyResource(staging.get(), tex.get());
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    check_hresult(m_ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped));
+    std::vector<uint32_t> out((size_t)td.Width * td.Height);
+    for (UINT y = 0; y < td.Height; y++)
+        memcpy(&out[(size_t)y * td.Width], static_cast<const char*>(mapped.pData) + (size_t)y * mapped.RowPitch, td.Width * 4);
+    m_ctx->Unmap(staging.get(), 0);
+    RecycleStaging(staging);
+    if (td.Format == DXGI_FORMAT_B8G8R8A8_UNORM)
+        for (uint32_t& c : out) c = (c & 0xFF00FF00) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF);
     return out;
 }
 

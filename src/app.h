@@ -80,6 +80,11 @@ void AppSettingsChanged();
 void AppStartScaling(HWND target);
 void AppStopScaling();
 void AppSlowMoToggle(double delaySeconds);  // 슬로모션 테스트 시작(이 시간 뒤 녹화) 또는 끝내기
+// 프레임 생성 영역 (확대 중인 게임의 프로필에 저장한다)
+void AppRegionEditBegin();          // 확대 화면 위에 영역 편집 창을 띄운다
+void AppRegionEditEnd(bool save);   // 편집 창을 닫는다. save면 영역을 저장한다
+bool AppRegionEditing();
+void AppRegionClear();              // 영역을 지워 화면 전체에 만든다
 ScalingStatus AppGetStatus();
 const GameProfile* AppActiveProfile();  // 지금 확대 중인 게임의 프로필. 없으면 nullptr
 const std::wstring& AppSettingsPath();

@@ -442,6 +442,104 @@ int RunFrameGenSelfTest(ID3D11Device* device, ID3D11DeviceContext* context, cons
     return 0;
 }
 
+int RunFrameGenRegionTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& outDir)
+{
+    MakeDirectories(outDir);
+    NoiseTexture noise;
+    auto scenes = MakeScenes(noise);
+    const int w = 960, h = 540;
+    const int rx = 240, ry = 60, rw = 400, rh = 420;  // 일부러 화면 가운데의 어중간한 위치
+    auto makeTexture = [&](const std::vector<uint32_t>& rgba, int tw, int th, int ox, int oy) {
+        std::vector<uint32_t> bgra((size_t)tw * th);
+        for (int y = 0; y < th; y++)
+            for (int x = 0; x < tw; x++) {
+                uint32_t c = rgba[(size_t)(y + oy) * w + x + ox];
+                bgra[(size_t)y * tw + x] = (c & 0xFF00FF00) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF);
+            }
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = tw;
+        td.Height = th;
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA data = { bgra.data(), (UINT)tw * 4, 0 };
+        winrt::com_ptr<ID3D11Texture2D> tex;
+        winrt::check_hresult(device->CreateTexture2D(&td, &data, tex.put()));
+        return tex;
+    };
+
+    int failures = 0;
+    printf("[영역 시험] %dx%d 화면, 영역 (%d, %d) %dx%d\n", w, h, rx, ry, rw, rh);
+    for (const char* key : { "pan", "rhythm", "sprites" }) {
+        const SceneInfo* scene = nullptr;
+        for (auto& s : scenes)
+            if (strcmp(s.key, key) == 0) scene = &s;
+        if (!scene) continue;
+        FrameGen withRegion(device, context), cropped(device, context);
+        FgOptions region, plain;
+        region.learn = plain.learn = false;
+        region.refreshHz = plain.refreshHz = 144;
+        region.regionX = rx;
+        region.regionY = ry;
+        region.regionW = rw;
+        region.regionH = rh;
+        std::vector<std::vector<uint32_t>> frames;
+        for (int i = 0; i < 4; i++) frames.push_back(Render(scene->shade, 10.0f + i, w, h));
+        int checked = 0, generated = 0, insideBad = 0, outsideBad = 0, heldBad = 0;
+        for (int i = 0; i < 4; i++) {
+            auto full = makeTexture(frames[i], w, h, 0, 0);
+            auto part = makeTexture(frames[i], rw, rh, rx, ry);
+            const double time = i * kInterval;
+            withRegion.PushFrame(full.get(), w, h, time, region);
+            cropped.PushFrame(part.get(), rw, rh, time, plain);
+            for (int k = 0; k < 6; k++) {
+                const double now = time + kInterval * (k / 6.0);
+                ID3D11ShaderResourceView* a = withRegion.Render(now, region);
+                ID3D11ShaderResourceView* b = cropped.Render(now, plain);
+                if (!a || !b) continue;
+                UINT aw, ah, bw, bh;
+                auto outA = withRegion.TestReadSrv(a, aw, ah);
+                auto outB = cropped.TestReadSrv(b, bw, bh);
+                checked++;
+                const float t = (float)withRegion.Stats().displayT;
+                if (t > 0.005f && t < 0.995f) generated++;
+                if (aw != (UINT)w || ah != (UINT)h || bw != (UINT)rw || bh != (UINT)rh) {
+                    insideBad++;
+                    continue;
+                }
+                // 영역 안: 그 부분만 넣은 프레임 생성과 같아야 한다.
+                for (int y = 0; y < rh; y++)
+                    for (int x = 0; x < rw; x++)
+                        if ((outA[(size_t)(y + ry) * w + x + rx] & 0xFFFFFF) != (outB[(size_t)y * rw + x] & 0xFFFFFF)) insideBad++;
+                // 영역 밖: 넣은 게임 프레임 중 하나와 똑같아야 한다.
+                bool anyMatch = false;
+                for (int j = 0; j <= i && !anyMatch; j++) {
+                    bool same = true;
+                    for (int y = 0; y < h && same; y += 3)
+                        for (int x = 0; x < w && same; x += 3) {
+                            if (x >= rx && x < rx + rw && y >= ry && y < ry + rh) continue;
+                            if ((outA[(size_t)y * w + x] & 0xFFFFFF) != (frames[j][(size_t)y * w + x] & 0xFFFFFF)) same = false;
+                        }
+                    anyMatch = same;
+                }
+                if (!anyMatch) outsideBad++;
+                // 비교 모드에 쓰는 프레임도 화면 전체 크기여야 한다.
+                UINT hw = 0, hh = 0;
+                if (auto held = withRegion.HeldFrame()) withRegion.TestReadSrv(held, hw, hh);
+                if (hw != (UINT)w || hh != (UINT)h) heldBad++;
+                if (i == 3 && k == 3) SaveFrameBmp(outDir + L"\\region_" + std::wstring(key, key + strlen(key)) + L".bmp", outA, w, h);
+            }
+        }
+        const bool ok = checked > 0 && generated > 0 && insideBad == 0 && outsideBad == 0 && heldBad == 0;
+        printf("%-10s 확인 %2d장 (만든 장면 %2d) · 영역 안 다른 픽셀 %d · 영역 밖 어긋난 장 %d · 비교 영상 크기 오류 %d  %s\n", key, checked, generated,
+               insideBad, outsideBad, heldBad, ok ? "통과" : "실패");
+        if (!ok) failures++;
+    }
+    return failures == 0 ? 0 : 1;
+}
+
 void SaveFrameBmp(const std::wstring& path, const std::vector<uint32_t>& rgba, int w, int h)
 {
     SaveBmp(path, rgba, w, h);

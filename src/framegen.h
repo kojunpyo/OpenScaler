@@ -34,6 +34,8 @@ struct FgOptions {
     bool learn = true;       // 게임별 학습
     bool useMap = true;      // 게임별 화면 지도의 움직임을 후보로 쓴다
     double refreshHz = 60;
+    // 프레임 생성 영역 (원본 픽셀). 너비가 0이면 화면 전체. 영역 밖은 표시 시점에 가까운 게임 프레임을 그대로 보여 준다.
+    int regionX = 0, regionY = 0, regionW = 0, regionH = 0;
 };
 
 struct FgStats {
@@ -111,6 +113,8 @@ public:
     TestResult TestSynthPsnr(int a, int b, int reference, float t, const FgParams& params, bool useMap, double interval);
     // 합성 결과를 읽어 온다 (RGBA)
     std::vector<uint32_t> TestReadOutput();
+    // Render나 HeldFrame이 돌려준 영상을 읽어 온다 (RGBA). w, h에 크기를 담는다
+    std::vector<uint32_t> TestReadSrv(ID3D11ShaderResourceView* srv, UINT& w, UINT& h);
     std::vector<uint32_t> TestReadVisualize(int a, int b, const FgParams& params, float t);
     // 지금 움직임 결과를 화면 지도에 넣는다
     void TestAddFlowSample(const FgParams& params, double interval);
@@ -131,8 +135,10 @@ private:
     static constexpr int kDuplicateLevel = 3;  // 중복 프레임 검사에 쓰는 단계 (1/8)
 
     struct Frame {
-        com_ptr<ID3D11Texture2D> color;
+        com_ptr<ID3D11Texture2D> color;  // 움직임 추정과 합성에 쓰는 영상 (영역을 지정했으면 그 부분만)
         com_ptr<ID3D11ShaderResourceView> colorSrv;
+        com_ptr<ID3D11Texture2D> full;   // 영역을 지정했을 때만: 화면 전체 (영역 밖을 그릴 때 쓴다)
+        com_ptr<ID3D11ShaderResourceView> fullSrv;
         std::array<com_ptr<ID3D11ShaderResourceView>, kLevels> lumaSrv;
         std::array<com_ptr<ID3D11UnorderedAccessView>, kLevels> lumaUav;
         double time = 0;
@@ -187,7 +193,10 @@ private:
     struct Cb;
 
     com_ptr<ID3D11ComputeShader> CreateCs(const char* entry);
-    void EnsureFrames(UINT w, UINT h);
+    // 화면 크기와 영역에 맞게 텍스처를 준비한다. 영역이 없으면(rw == 0) 화면 전체를 쓴다.
+    void EnsureFrames(UINT w, UINT h, UINT rx = 0, UINT ry = 0, UINT rw = 0, UINT rh = 0);
+    ID3D11ShaderResourceView* RenderRegion(double now, const FgOptions& options);  // 영역 크기의 결과
+    ID3D11ShaderResourceView* FullOf(ID3D11ShaderResourceView* srv) const;  // 영역 영상이면 그 프레임의 전체 화면
     FlowSet& GetFlowSet(int cellPx);
     Target MakeTarget(UINT w, UINT h, DXGI_FORMAT format, bool uav);
     void Run(ID3D11ComputeShader* cs, std::initializer_list<ID3D11ShaderResourceView*> srvs, ID3D11UnorderedAccessView* uav,
@@ -226,11 +235,16 @@ private:
     com_ptr<ID3D11Device> m_device;
     com_ptr<ID3D11DeviceContext> m_ctx;
     com_ptr<ID3D11ComputeShader> m_csLuma, m_csDown, m_csMatch, m_csConsist, m_csProject, m_csFill, m_csCompose, m_csBlend,
-        m_csVisualize, m_csMse, m_csResize, m_csRifeCompose;
+        m_csVisualize, m_csMse, m_csResize, m_csRifeCompose, m_csPaste;
     com_ptr<ID3D11Buffer> m_cb;
     com_ptr<ID3D11SamplerState> m_sampler;
 
-    UINT m_w = 0, m_h = 0;
+    UINT m_w = 0, m_h = 0;           // 움직임 추정과 합성 크기 (영역을 지정했으면 영역 크기)
+    UINT m_fullW = 0, m_fullH = 0;   // 화면 전체 크기
+    UINT m_regionX = 0, m_regionY = 0;
+    bool m_region = false;           // 영역을 지정했는지
+    Target m_regionOutput;           // 영역 결과를 화면 전체에 붙인 것
+    const Frame* m_outside = nullptr;  // 이번 화면에서 영역 밖에 보여 줄 게임 프레임
     std::array<UINT, kLevels> m_lvlW{}, m_lvlH{};
     std::array<Frame, kFrames> m_frames;  // 0이 최신
     int m_count = 0;

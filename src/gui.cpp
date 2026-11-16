@@ -142,7 +142,12 @@ const char* kSlowMoWaiting = "곧 녹화해요. 게임 창을 눌러 주세요";
 const char* kSlowMoRecording = "녹화 중이에요";
 const char* kSlowMoGenerating = "프레임 만드는 중 %d / %d";
 const char* kSlowMoPlaying = "재생 중 %d / %d";
-const char* kSecondaryTexts[] = { kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
+const char* kRegionDesc = "리듬게임의 건반처럼 움직이는 곳만 고르면 계산이 줄고, 학습도 그 안에서만 해요. 영역 밖은 게임 화면을 그대로 보여 줘요.";
+const char* kRegionIdle = "확대를 시작하면 지정할 수 있어요";
+const char* kRegionNone = "지정한 영역 없음 · 화면 전체에 만들어요";
+const char* kRegionFormat = "지정한 영역: 가로 %d%% · 세로 %d%% (원본 %d×%d)";
+const char* kRegionEditing = "확대 화면에서 테두리를 끌어 조절하고 Enter로 저장해요";
+const char* kSecondaryTexts[] = { kRegionDesc, kRegionIdle, kRegionNone, kRegionFormat, kRegionEditing, kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
                                   kFgRifeFormat, kRifeLoading, kRifeFailed, kRifeMissing,
                                   kSlowMoDesc, kSlowMoIdle, kSlowMoPlan, kSlowMoWaiting, kSlowMoRecording, kSlowMoGenerating, kSlowMoPlaying,
                                   kLearnDesc, kLearnInterpFormat, kLearnExtrapFormat, kGraphLegend, kGraphLegendExtrap, kNoProfiles, kNoHistory,
@@ -878,6 +883,35 @@ void DrawUi()
                    "자동이면 채점에서 더 좋게 나올 때만 써요.");
         if (PixelCheckbox("움직임 시각화", &s.fgVisualize)) changed = true;
         HelpMarker("찾아낸 움직임을 색으로 보여 줘요. 방향은 색, 빠르기는 진하기예요.");
+    }
+
+    // 프레임 생성 영역: 확대 중인 게임의 프로필에 저장한다.
+    RowLabel("영역");
+    Description(kRegionDesc);
+    {
+        const GameProfile* profile = AppActiveProfile();
+        const bool editing = AppRegionEditing();
+        char regionText[128];
+        if (!status.active) snprintf(regionText, sizeof(regionText), "%s", kRegionIdle);
+        else if (editing) snprintf(regionText, sizeof(regionText), "%s", kRegionEditing);
+        else if (profile && profile->HasRegion())
+            snprintf(regionText, sizeof(regionText), kRegionFormat, (int)std::lround(profile->regionW * 100), (int)std::lround(profile->regionH * 100),
+                     (int)std::lround(profile->regionW * status.srcW), (int)std::lround(profile->regionH * status.srcH));
+        else snprintf(regionText, sizeof(regionText), "%s", kRegionNone);
+        Description(regionText);
+        ImGui::BeginDisabled(!status.active);
+        if (editing) {
+            if (ImGui::Button("저장")) AppRegionEditEnd(true);
+            ImGui::SameLine();
+            if (ImGui::Button("취소")) AppRegionEditEnd(false);
+        } else {
+            if (ImGui::Button("영역 지정하기")) AppRegionEditBegin();
+            if (profile && profile->HasRegion()) {
+                ImGui::SameLine();
+                if (ImGui::Button("영역 지우기")) AppRegionClear();
+            }
+        }
+        ImGui::EndDisabled();
     }
     if (status.fgActive) {
         char fgText[160];

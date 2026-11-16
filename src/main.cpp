@@ -461,6 +461,239 @@ static HWND CreateOverlay(const RECT& rc)
 }
 
 // ---------------------------------------------------------------------------
+// 프레임 생성 영역 편집 창
+// 확대 화면 위에 덮어 지금 영역을 보여 준다. 테두리와 모서리를 끌면 크기가, 안쪽을 끌면 위치가 바뀐다.
+// 창 전체를 덮어야 영역 밖 클릭이 게임으로 가지 않으므로, 영역 밖은 어둡게, 안쪽은 거의 투명하게 그린다.
+// ---------------------------------------------------------------------------
+
+enum RegionDrag { DRAG_NONE = 0, DRAG_LEFT = 1, DRAG_TOP = 2, DRAG_RIGHT = 4, DRAG_BOTTOM = 8, DRAG_MOVE = 16 };
+
+static struct RegionEditor {
+    HWND hwnd = nullptr;
+    RECT area{};    // 확대 화면 영역 (화면 좌표). 편집 창이 이만큼 덮는다
+    RECT rc{};      // 지금 영역 (창 좌표)
+    int drag = DRAG_NONE;
+    POINT dragStart{};
+    RECT dragStartRc{};
+    int minSize = 32;  // 창 좌표의 최소 크기
+} g_region;
+
+static const int kRegionGrip = 12;  // 테두리를 잡을 수 있는 두께 (픽셀)
+
+static int RegionHit(POINT p)
+{
+    const RECT& r = g_region.rc;
+    const bool inY = p.y >= r.top - kRegionGrip && p.y <= r.bottom + kRegionGrip;
+    const bool inX = p.x >= r.left - kRegionGrip && p.x <= r.right + kRegionGrip;
+    int hit = 0;
+    if (inY && std::abs(p.x - r.left) <= kRegionGrip) hit |= DRAG_LEFT;
+    else if (inY && std::abs(p.x - r.right) <= kRegionGrip) hit |= DRAG_RIGHT;
+    if (inX && std::abs(p.y - r.top) <= kRegionGrip) hit |= DRAG_TOP;
+    else if (inX && std::abs(p.y - r.bottom) <= kRegionGrip) hit |= DRAG_BOTTOM;
+    if (!hit && PtInRect(&r, p)) hit = DRAG_MOVE;
+    return hit;
+}
+
+// 반투명 창을 픽셀마다 알파를 정해 다시 그린다 (미리 곱한 알파의 BGRA).
+static void RegionPaint()
+{
+    const int w = g_region.area.right - g_region.area.left, h = g_region.area.bottom - g_region.area.top;
+    if (w <= 0 || h <= 0) return;
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    void* bits = nullptr;
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ oldBmp = SelectObject(dc, bmp);
+    auto px = static_cast<uint32_t*>(bits);
+
+    const RECT& r = g_region.rc;
+    const uint32_t kDim = 0x78000000;     // 영역 밖: 검정, 알파 120
+    const uint32_t kInside = 0x01000000;  // 영역 안: 거의 투명 (알파가 0이면 클릭이 게임으로 간다)
+    const uint32_t kPink = 0xFFE0457Bu;   // 테두리: 진한 분홍 (설정 창의 Scaler 색)
+    const int border = 4;
+    for (int y = 0; y < h; y++) {
+        uint32_t* row = px + (size_t)y * w;
+        const bool rowIn = y >= r.top && y < r.bottom;
+        for (int x = 0; x < w; x++) row[x] = rowIn && x >= r.left && x < r.right ? kInside : kDim;
+    }
+    auto fill = [&](int l, int t, int rr, int b, uint32_t c) {
+        l = std::max(l, 0), t = std::max(t, 0), rr = std::min(rr, w), b = std::min(b, h);
+        for (int y = t; y < b; y++)
+            for (int x = l; x < rr; x++) px[(size_t)y * w + x] = c;
+    };
+    // 두꺼운 테두리와 손잡이. 영역이 화면 끝에 닿아도 보이도록 영역 안쪽에 그린다.
+    fill(r.left, r.top, r.right, r.top + border, kPink);
+    fill(r.left, r.bottom - border, r.right, r.bottom, kPink);
+    fill(r.left, r.top, r.left + border, r.bottom, kPink);
+    fill(r.right - border, r.top, r.right, r.bottom, kPink);
+    const int grip = 14;
+    const int midX = (r.left + r.right) / 2, midY = (r.top + r.bottom) / 2;
+    for (int gy : { (int)r.top + grip / 2, (int)r.bottom - grip / 2, midY })
+        for (int gx : { (int)r.left + grip / 2, (int)r.right - grip / 2, midX }) {
+            if (gx == midX && gy == midY) continue;
+            const int cx = gx, cy = gy;
+            fill(cx - grip / 2, cy - grip / 2, cx + grip / 2, cy + grip / 2, 0xFFFFFFFF);
+            fill(cx - grip / 2 + 3, cy - grip / 2 + 3, cx + grip / 2 - 3, cy + grip / 2 - 3, kPink);
+        }
+
+    // 안내 문구: 흰 상자에 GDI로 쓴 뒤, GDI가 지운 알파를 상자 안에서 다시 채운다.
+    const wchar_t* text = L"테두리를 끌어 크기 조절 · 안쪽을 끌어 이동 · Enter 저장 · Esc 취소";
+    HFONT font = CreateFontW(-std::max(14, h / 60), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, NONANTIALIASED_QUALITY, 0, L"Malgun Gothic");
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SIZE ts{};
+    GetTextExtentPoint32W(dc, text, (int)wcslen(text), &ts);
+    RECT box = { (w - ts.cx) / 2 - 12, 16, (w + ts.cx) / 2 + 12, 16 + ts.cy + 12 };
+    if (box.bottom + 8 > r.top && box.top < r.bottom && box.right > r.left && box.left < r.right && r.bottom + box.bottom + 24 < h)
+        OffsetRect(&box, 0, h - box.bottom - 16);  // 영역과 겹치면 아래로 옮긴다
+    fill(box.left - 3, box.top - 3, box.right + 3, box.bottom + 3, kPink);
+    fill(box.left, box.top, box.right, box.bottom, 0xFFFFFFFF);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(0, 0, 0));
+    GdiFlush();
+    TextOutW(dc, box.left + 12, box.top + 6, text, (int)wcslen(text));
+    GdiFlush();
+    for (int y = std::max(0L, box.top); y < std::min((LONG)h, box.bottom); y++)
+        for (int x = std::max(0L, box.left); x < std::min((LONG)w, box.right); x++) px[(size_t)y * w + x] |= 0xFF000000;
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+
+    POINT src = { 0, 0 };
+    POINT dst = { g_region.area.left, g_region.area.top };
+    SIZE size = { w, h };
+    BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(g_region.hwnd, screen, &dst, &size, dc, &src, 0, &blend, ULW_ALPHA);
+    SelectObject(dc, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+    ReleaseDC(nullptr, screen);
+}
+
+static void RegionEditEnd(bool save);
+
+static LRESULT CALLBACK RegionEditorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_SETCURSOR: {
+        POINT p;
+        GetCursorPos(&p);
+        ScreenToClient(hwnd, &p);
+        const int hit = g_region.drag ? g_region.drag : RegionHit(p);
+        LPCWSTR cursor = IDC_ARROW;
+        if (hit == DRAG_MOVE) cursor = IDC_SIZEALL;
+        else if (hit == (DRAG_LEFT | DRAG_TOP) || hit == (DRAG_RIGHT | DRAG_BOTTOM)) cursor = IDC_SIZENWSE;
+        else if (hit == (DRAG_RIGHT | DRAG_TOP) || hit == (DRAG_LEFT | DRAG_BOTTOM)) cursor = IDC_SIZENESW;
+        else if (hit & (DRAG_LEFT | DRAG_RIGHT)) cursor = IDC_SIZEWE;
+        else if (hit & (DRAG_TOP | DRAG_BOTTOM)) cursor = IDC_SIZENS;
+        SetCursor(LoadCursorW(nullptr, cursor));
+        return TRUE;
+    }
+    case WM_LBUTTONDOWN: {
+        POINT p = { (short)LOWORD(lp), (short)HIWORD(lp) };
+        g_region.drag = RegionHit(p);
+        if (g_region.drag) {
+            g_region.dragStart = p;
+            g_region.dragStartRc = g_region.rc;
+            SetCapture(hwnd);
+        }
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        if (!g_region.drag) return 0;
+        POINT p = { (short)LOWORD(lp), (short)HIWORD(lp) };
+        const int dx = p.x - g_region.dragStart.x, dy = p.y - g_region.dragStart.y;
+        const int w = g_region.area.right - g_region.area.left, h = g_region.area.bottom - g_region.area.top;
+        const int m = g_region.minSize;
+        RECT r = g_region.dragStartRc;
+        if (g_region.drag == DRAG_MOVE) {
+            const int ox = std::clamp(dx, (int)-r.left, (int)(w - r.right)), oy = std::clamp(dy, (int)-r.top, (int)(h - r.bottom));
+            OffsetRect(&r, ox, oy);
+        } else {
+            if (g_region.drag & DRAG_LEFT) r.left = std::clamp((int)r.left + dx, 0, (int)r.right - m);
+            if (g_region.drag & DRAG_RIGHT) r.right = std::clamp((int)r.right + dx, (int)r.left + m, w);
+            if (g_region.drag & DRAG_TOP) r.top = std::clamp((int)r.top + dy, 0, (int)r.bottom - m);
+            if (g_region.drag & DRAG_BOTTOM) r.bottom = std::clamp((int)r.bottom + dy, (int)r.top + m, h);
+        }
+        if (!EqualRect(&r, &g_region.rc)) {
+            g_region.rc = r;
+            RegionPaint();
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP:
+    case WM_CAPTURECHANGED:
+        if (g_region.drag && msg == WM_LBUTTONUP) ReleaseCapture();
+        g_region.drag = DRAG_NONE;
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_RETURN) RegionEditEnd(true);
+        else if (wp == VK_ESCAPE) RegionEditEnd(false);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void RegionEditBegin()
+{
+    if (!g_scaling || !g_scaling->layoutValid || g_region.hwnd) return;
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = { sizeof(wc) };
+        wc.lpfnWndProc = RegionEditorProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"OpenScalerRegionEditor";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    const ScalingSession* s = g_scaling;
+    g_region.area = s->dstScreen;
+    const int w = s->dstScreen.right - s->dstScreen.left, h = s->dstScreen.bottom - s->dstScreen.top;
+    // 프레임 생성이 거절하는 크기(원본 64픽셀)보다 작게 줄이지 못하게 한다.
+    g_region.minSize = std::max(32, (int)std::ceil(64.0 * w / std::max(1u, s->srcW)));
+    const GameProfile& p = s->profile;
+    if (p.HasRegion())
+        g_region.rc = { std::lround(p.regionX * w), std::lround(p.regionY * h), std::lround((p.regionX + p.regionW) * w),
+                        std::lround((p.regionY + p.regionH) * h) };
+    else
+        g_region.rc = { w / 4, 0, w - w / 4, h };  // 처음에는 가운데 세로 띠 (리듬게임의 건반 자리)
+    g_region.drag = DRAG_NONE;
+    g_region.hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"OpenScalerRegionEditor", L"OpenScaler 영역 지정",
+                                    WS_POPUP, g_region.area.left, g_region.area.top, w, h, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    RegionPaint();
+    ShowWindow(g_region.hwnd, SW_SHOW);
+    SetForegroundWindow(g_region.hwnd);
+}
+
+static void RegionEditEnd(bool save)
+{
+    if (!g_region.hwnd) return;
+    if (save && g_scaling) {
+        const double w = g_region.area.right - g_region.area.left, h = g_region.area.bottom - g_region.area.top;
+        const RECT& r = g_region.rc;
+        // 거의 화면 전체를 고르면 영역 없음과 같으므로 지운다.
+        if (r.left <= 1 && r.top <= 1 && r.right >= w - 1 && r.bottom >= h - 1) g_scaling->profile.SetRegion(0, 0, 0, 0);
+        else g_scaling->profile.SetRegion((float)(r.left / w), (float)(r.top / h), (float)((r.right - r.left) / w), (float)((r.bottom - r.top) / h));
+        g_scaling->profile.Save(ProfilesDirectory());
+    }
+    HWND hwnd = g_region.hwnd;
+    g_region.hwnd = nullptr;
+    g_region.drag = DRAG_NONE;
+    DestroyWindow(hwnd);
+}
+
+static void RegionClear()
+{
+    if (!g_scaling) return;
+    g_scaling->profile.SetRegion(0, 0, 0, 0);
+    g_scaling->profile.Save(ProfilesDirectory());
+}
+
+// ---------------------------------------------------------------------------
 // 커서 좌표 변환
 // ---------------------------------------------------------------------------
 
@@ -513,6 +746,11 @@ static void UpdateCursor(ScalingSession* s)
 
     POINT p;
     if (!GetCursorPos(&p)) return;
+    // 영역 편집 중에는 편집 창을 직접 끌어야 하므로 커서를 원본 창으로 옮기지 않는다.
+    if (g_region.hwnd) {
+        if (s->cursorMapped) ReleaseCursor(s, SrcToDst(s, ClampToRect(p, s->srcScreen)));
+        return;
+    }
     bool foreground = GetForegroundWindow() == s->target;
     const RECT& src = s->srcScreen;
     const RECT& dst = s->dstScreen;
@@ -665,11 +903,13 @@ static void StopScaling()
     ShowSystemCursor(true);
     RestoreMouseSpeed();
     SlowMoStop();
+    RegionEditEnd(false);
     if (g_frameGen) {
         g_frameGen->SetProfile(nullptr);
         g_frameGen->Reset();
     }
-    if (g_scaling->profile.interp.evalCount + g_scaling->profile.extrap.evalCount > 0 || g_scaling->profile.mapSamples > 0)
+    if (g_scaling->profile.interp.evalCount + g_scaling->profile.extrap.evalCount > 0 || g_scaling->profile.mapSamples > 0 ||
+        g_scaling->profile.HasRegion())
         g_scaling->profile.Save(ProfilesDirectory());
     if (g_scaling->session) g_scaling->session.Close();
     if (g_scaling->framePool) g_scaling->framePool.Close();
@@ -1154,6 +1394,13 @@ static FgOptions CurrentFgOptions(const ScalingSession* s)
     o.learn = g_settings.fgLearn;
     o.useMap = g_settings.fgPreset != FG_PRESET_NO_MAP;
     o.refreshHz = s->refreshHz;
+    if (s->profile.HasRegion()) {
+        const GameProfile& p = s->profile;
+        o.regionX = (int)std::lround(p.regionX * s->srcW);
+        o.regionY = (int)std::lround(p.regionY * s->srcH);
+        o.regionW = (int)std::lround((p.regionX + p.regionW) * s->srcW) - o.regionX;
+        o.regionH = (int)std::lround((p.regionY + p.regionH) * s->srcH) - o.regionY;
+    }
     return o;
 }
 
@@ -1410,7 +1657,8 @@ static void PrintStatus()
     // 비정상 종료에 대비해 학습 결과를 가끔 저장한다.
     if (now - g_scaling->profileSaveTime > std::chrono::seconds(60)) {
         g_scaling->profileSaveTime = now;
-        if (g_scaling->profile.interp.evalCount + g_scaling->profile.extrap.evalCount > 0 || g_scaling->profile.mapSamples > 0)
+        if (g_scaling->profile.interp.evalCount + g_scaling->profile.extrap.evalCount > 0 || g_scaling->profile.mapSamples > 0 ||
+        g_scaling->profile.HasRegion())
             g_scaling->profile.Save(ProfilesDirectory());
     }
 }
@@ -1490,6 +1738,10 @@ void AppSettingsChanged()
 void AppStartScaling(HWND target) { StartScaling(target); }
 void AppStopScaling() { StopScaling(); }
 void AppSlowMoToggle(double delaySeconds) { SlowMoToggle(delaySeconds); }
+void AppRegionEditBegin() { RegionEditBegin(); }
+void AppRegionEditEnd(bool save) { RegionEditEnd(save); }
+bool AppRegionEditing() { return g_region.hwnd != nullptr; }
+void AppRegionClear() { RegionClear(); }
 const std::wstring& AppSettingsPath() { return g_settingsPath; }
 
 ScalingStatus AppGetStatus()
@@ -1605,9 +1857,11 @@ int wmain(int argc, wchar_t** argv)
     // 명령줄 옵션: --target "창 제목 일부" --duration 초 --mode 0~4 --sharp 0~1 --integer
     //             --no-gui (설정 창 없이 실행) --console (로그를 보여 줄 콘솔 창 열기)
     std::wstring targetTitle;
+    std::wstring fgRegionTestDir;
     std::wstring fgSelfTestDir, rifeBenchDir, fgGapTestDump, fgGapTestOut, fgGapTestProfile;
     double duration = 0;
     double slowMoAuto = -1;
+    bool regionEditAuto = false;  // 테스트용: 확대가 시작되면 영역 편집 창을 띄운다
     bool useGui = true;
     for (int i = 1; i < argc; i++) {
         std::wstring a = argv[i];
@@ -1628,6 +1882,7 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--compare") g_settings.compare = true;
         else if (a == L"--cursor-speed") g_settings.adjustCursorSpeed = true;
         else if (a == L"--fg-selftest" && i + 1 < argc) fgSelfTestDir = argv[++i];
+        else if (a == L"--fg-regiontest" && i + 1 < argc) fgRegionTestDir = argv[++i];
         else if (a == L"--rife-bench" && i + 1 < argc) rifeBenchDir = argv[++i];
         else if (a == L"--fg-gaptest" && i + 2 < argc) {
             fgGapTestDump = argv[++i];
@@ -1644,6 +1899,7 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--fg-visualize") g_settings.fgVisualize = true;
         else if (a == L"--fg-log" && i + 1 < argc) _wfopen_s(&g_fgLog, argv[++i], L"w");
         else if (a == L"--slowmo-auto" && i + 1 < argc) slowMoAuto = _wtof(argv[++i]);
+        else if (a == L"--region-edit") regionEditAuto = true;
         else if (a == L"--slowmo-target" && i + 1 < argc) g_settings.slowMoTargetFps = std::clamp(_wtoi(argv[++i]), 30, 1000);
         else if (a == L"--slowmo-seconds" && i + 1 < argc) g_settings.slowMoSeconds = std::clamp(_wtoi(argv[++i]), 1, 3);
         else if (a == L"--slowmo-dump" && i + 1 < argc) g_slowMo.dumpDir = argv[++i];
@@ -1667,6 +1923,11 @@ int wmain(int argc, wchar_t** argv)
         InitD3D();
         if (!fgSelfTestDir.empty()) {
             exitCode = RunFrameGenSelfTest(g_device.get(), g_ctx.get(), fgSelfTestDir);
+            MagUninitialize();
+            return exitCode;
+        }
+        if (!fgRegionTestDir.empty()) {
+            exitCode = RunFrameGenRegionTest(g_device.get(), g_ctx.get(), fgRegionTestDir);
             MagUninitialize();
             return exitCode;
         }
@@ -1723,6 +1984,10 @@ int wmain(int argc, wchar_t** argv)
                 WaitForSingleObjectEx(g_scaling->frameWaitable, 100, TRUE);
                 RenderFrame();
                 PrintStatus();
+                if (regionEditAuto && g_scaling && g_scaling->layoutValid) {
+                    RegionEditBegin();
+                    regionEditAuto = false;
+                }
                 if (useGui) GuiRender(true);  // 확대 화면 속도에 영향이 없도록 가끔만 그린다
             } else if (useGui && GuiIsVisible()) {
                 GuiRender(false);  // 수직동기에 맞춰 그리므로 바쁜 루프가 되지 않는다
