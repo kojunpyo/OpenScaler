@@ -41,6 +41,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 - `src/fsr.hlsl`, `src/fsr_constants.*`: FSR 1.0. fxc로 빌드 때 컴파일
 - `third_party/`: fsr(MIT), imgui(MIT), galmuri(OFL 1.1), onnxruntime 헤더(MIT)
 - `tools/make_icon.ps1`: 로고와 아이콘 생성
+- `tools/profile_info.py`: 학습 데이터 요약, 비교, 형식 검사 (CI가 `shared-profiles/`를 검사). 공유 방법은 `docs/sharing-profiles.md`
 - `tools/test/`: 수동 테스트 스크립트 (`demoform.ps1`: README 시연 화면용 창, `devicecheck.ps1`: 다른 기기에서 기록 모으기, `fgtiming.py`/`fgquality.py`: README 평가 기준으로 등급 매기기)
 
 렌더링 순서: 캡처 -> 보이는 클라이언트 영역 복사 -> 프레임 생성(켠 경우) -> Pass 1 업스케일 -> Pass 2 샤프닝 -> 비교 모드 -> 커서 -> Direct2D 상태 표시 -> Present.

@@ -85,6 +85,9 @@ void AppRegionEditBegin();          // 확대 화면 위에 영역 편집 창을
 void AppRegionEditEnd(bool save);   // 편집 창을 닫는다. save면 영역을 저장한다
 bool AppRegionEditing();
 void AppRegionClear();              // 영역을 지워 화면 전체에 만든다
+// 학습 데이터 공유 (docs/sharing-profiles.md)
+bool AppImportProfile(const std::wstring& file, std::wstring& gameName, std::wstring& message);
+bool AppExportProfile(const std::wstring& gameName, const std::wstring& file);
 ScalingStatus AppGetStatus();
 const GameProfile* AppActiveProfile();  // 지금 확대 중인 게임의 프로필. 없으면 nullptr
 const std::wstring& AppSettingsPath();

@@ -21,6 +21,10 @@ jobs:
         with:
           arch: x64
 
+      # PR로 올라온 공유 학습 데이터의 형식을 확인한다 (docs/sharing-profiles.md).
+      - name: Check shared profiles
+        run: python -I tools/profile_info.py --check shared-profiles
+
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 

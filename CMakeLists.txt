@@ -67,4 +67,4 @@ set_source_files_properties(src/openscaler.rc PROPERTIES OBJECT_DEPENDS
 target_compile_definitions(OpenScaler PRIVATE UNICODE _UNICODE NOMINMAX OPENSCALER_VERSION="${PROJECT_VERSION}")
 target_compile_options(OpenScaler PRIVATE /utf-8 /W3 /EHsc /permissive-)
 target_link_options(OpenScaler PRIVATE /ENTRY:wmainCRTStartup)
-target_link_libraries(OpenScaler PRIVATE imgui d3d11 dxgi d3dcompiler d2d1 dwrite dwmapi magnification windowsapp)
+target_link_libraries(OpenScaler PRIVATE imgui d3d11 dxgi d3dcompiler d2d1 dwrite dwmapi magnification windowsapp comdlg32)

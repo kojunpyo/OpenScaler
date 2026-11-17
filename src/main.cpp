@@ -460,6 +460,17 @@ static HWND CreateOverlay(const RECT& rc)
     return hwnd;
 }
 
+// 확대 중인 게임의 프로필을 저장한다. 공유할 때 참고하도록 게임 화면 크기도 남긴다.
+static void SaveActiveProfile()
+{
+    if (!g_scaling) return;
+    if (g_scaling->srcW > 0) {
+        g_scaling->profile.sourceW = (int)g_scaling->srcW;
+        g_scaling->profile.sourceH = (int)g_scaling->srcH;
+    }
+    g_scaling->profile.Save(ProfilesDirectory());
+}
+
 // ---------------------------------------------------------------------------
 // 프레임 생성 영역 편집 창
 // 확대 화면 위에 덮어 지금 영역을 보여 준다. 테두리와 모서리를 끌면 크기가, 안쪽을 끌면 위치가 바뀐다.
@@ -678,7 +689,7 @@ static void RegionEditEnd(bool save)
         // 거의 화면 전체를 고르면 영역 없음과 같으므로 지운다.
         if (r.left <= 1 && r.top <= 1 && r.right >= w - 1 && r.bottom >= h - 1) g_scaling->profile.SetRegion(0, 0, 0, 0);
         else g_scaling->profile.SetRegion((float)(r.left / w), (float)(r.top / h), (float)((r.right - r.left) / w), (float)((r.bottom - r.top) / h));
-        g_scaling->profile.Save(ProfilesDirectory());
+        SaveActiveProfile();
     }
     HWND hwnd = g_region.hwnd;
     g_region.hwnd = nullptr;
@@ -690,7 +701,7 @@ static void RegionClear()
 {
     if (!g_scaling) return;
     g_scaling->profile.SetRegion(0, 0, 0, 0);
-    g_scaling->profile.Save(ProfilesDirectory());
+    SaveActiveProfile();
 }
 
 // ---------------------------------------------------------------------------
@@ -910,7 +921,7 @@ static void StopScaling()
     }
     if (g_scaling->profile.interp.evalCount + g_scaling->profile.extrap.evalCount > 0 || g_scaling->profile.mapSamples > 0 ||
         g_scaling->profile.HasRegion())
-        g_scaling->profile.Save(ProfilesDirectory());
+        SaveActiveProfile();
     if (g_scaling->session) g_scaling->session.Close();
     if (g_scaling->framePool) g_scaling->framePool.Close();
     g_d2dCtx->SetTarget(nullptr);
@@ -1659,7 +1670,7 @@ static void PrintStatus()
         g_scaling->profileSaveTime = now;
         if (g_scaling->profile.interp.evalCount + g_scaling->profile.extrap.evalCount > 0 || g_scaling->profile.mapSamples > 0 ||
         g_scaling->profile.HasRegion())
-            g_scaling->profile.Save(ProfilesDirectory());
+            SaveActiveProfile();
     }
 }
 
@@ -1742,6 +1753,75 @@ void AppRegionEditBegin() { RegionEditBegin(); }
 void AppRegionEditEnd(bool save) { RegionEditEnd(save); }
 bool AppRegionEditing() { return g_region.hwnd != nullptr; }
 void AppRegionClear() { RegionClear(); }
+
+// 공유받은 학습 데이터를 profiles 폴더에 넣는다. 같은 게임의 기존 파일은 profiles/backup으로 옮겨 둔다.
+bool AppImportProfile(const std::wstring& file, std::wstring& gameName, std::wstring& message)
+{
+    GameProfile incoming;
+    if (!incoming.Load(file)) {
+        message = L"OpenScaler 학습 데이터 파일이 아니에요.";
+        return false;
+    }
+    // 파일에 적힌 게임 이름을 쓴다. 예전 파일처럼 이름이 없으면 파일 이름을 쓴다.
+    gameName = GameProfile::ReadName(file);
+    if (gameName.empty()) {
+        gameName = file.substr(file.find_last_of(L"\\/") + 1);
+        if (gameName.size() > 5 && _wcsicmp(gameName.c_str() + gameName.size() - 5, L".json") == 0) gameName.resize(gameName.size() - 5);
+    }
+    const std::wstring dir = ProfilesDirectory();
+    const std::wstring dest = ProfilePath(dir, gameName);
+    wchar_t fullFile[MAX_PATH], fullDest[MAX_PATH];
+    if (GetFullPathNameW(file.c_str(), MAX_PATH, fullFile, nullptr) && GetFullPathNameW(dest.c_str(), MAX_PATH, fullDest, nullptr) &&
+        _wcsicmp(fullFile, fullDest) == 0) {
+        message = L"이미 profiles 폴더에 있는 파일이에요.";
+        return false;
+    }
+
+    // 확대 중인 게임이면 지금까지의 학습을 먼저 저장해서 함께 백업한다.
+    const bool active = g_scaling && g_scaling->profile.name == gameName;
+    if (active) SaveActiveProfile();
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const bool hadData = GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (hadData) {
+        const std::wstring backupDir = dir + L"\\backup";
+        CreateDirectoryW(backupDir.c_str(), nullptr);
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        wchar_t stamp[32];
+        swprintf_s(stamp, L"_%04d%02d%02d-%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        std::wstring backup = ProfilePath(backupDir, gameName);
+        backup.insert(backup.size() - 5, stamp);
+        if (!MoveFileExW(dest.c_str(), backup.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            message = L"기존 데이터를 백업하지 못해 가져오지 않았어요.";
+            return false;
+        }
+    }
+    // 이름을 고쳐 다시 저장한다 (파일 이름과 안에 적힌 이름을 맞춘다).
+    incoming.name = gameName;
+    if (!incoming.Save(dir)) {
+        message = L"profiles 폴더에 저장하지 못했어요.";
+        return false;
+    }
+    if (active) {
+        // 확대 중인 게임이면 바로 공유받은 데이터로 바꾸고, 그 위에서 이어서 학습한다.
+        g_scaling->profile = incoming;
+        if (g_frameGen) g_frameGen->ProfileReloaded();
+    }
+    message = hadData ? L"가져왔어요. 이전 데이터는 profiles\\backup에 있어요." : L"가져왔어요.";
+    return true;
+}
+
+// 학습 데이터를 공유용으로 내보낸다. 확대 중인 게임이면 저장 전 기록까지 담는다.
+bool AppExportProfile(const std::wstring& gameName, const std::wstring& file)
+{
+    if (g_scaling && g_scaling->profile.name == gameName) {
+        SaveActiveProfile();
+        return g_scaling->profile.SaveTo(file);
+    }
+    GameProfile p;
+    p.name = gameName;
+    return p.Load(ProfilePath(ProfilesDirectory(), gameName)) && p.SaveTo(file);
+}
 const std::wstring& AppSettingsPath() { return g_settingsPath; }
 
 ScalingStatus AppGetStatus()
@@ -1858,6 +1938,7 @@ int wmain(int argc, wchar_t** argv)
     //             --no-gui (설정 창 없이 실행) --console (로그를 보여 줄 콘솔 창 열기)
     std::wstring targetTitle;
     std::wstring fgRegionTestDir;
+    std::wstring importProfile, exportProfileName, exportProfileFile;  // 학습 데이터 공유 (설정 창 버튼과 같다)
     std::wstring fgSelfTestDir, rifeBenchDir, fgGapTestDump, fgGapTestOut, fgGapTestProfile;
     double duration = 0;
     double slowMoAuto = -1;
@@ -1883,6 +1964,11 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--cursor-speed") g_settings.adjustCursorSpeed = true;
         else if (a == L"--fg-selftest" && i + 1 < argc) fgSelfTestDir = argv[++i];
         else if (a == L"--fg-regiontest" && i + 1 < argc) fgRegionTestDir = argv[++i];
+        else if (a == L"--import-profile" && i + 1 < argc) importProfile = argv[++i];
+        else if (a == L"--export-profile" && i + 2 < argc) {
+            exportProfileName = argv[++i];
+            exportProfileFile = argv[++i];
+        }
         else if (a == L"--rife-bench" && i + 1 < argc) rifeBenchDir = argv[++i];
         else if (a == L"--fg-gaptest" && i + 2 < argc) {
             fgGapTestDump = argv[++i];
@@ -1925,6 +2011,19 @@ int wmain(int argc, wchar_t** argv)
             exitCode = RunFrameGenSelfTest(g_device.get(), g_ctx.get(), fgSelfTestDir);
             MagUninitialize();
             return exitCode;
+        }
+        if (!importProfile.empty()) {
+            std::wstring name, message;
+            const bool ok = AppImportProfile(importProfile, name, message);
+            printf("[가져오기] %s: %s\n", winrt::to_string(name).c_str(), winrt::to_string(message).c_str());
+            MagUninitialize();
+            return ok ? 0 : 1;
+        }
+        if (!exportProfileName.empty()) {
+            const bool ok = AppExportProfile(exportProfileName, exportProfileFile);
+            printf("[내보내기] %s\n", ok ? "완료" : "실패");
+            MagUninitialize();
+            return ok ? 0 : 1;
         }
         if (!fgRegionTestDir.empty()) {
             exitCode = RunFrameGenRegionTest(g_device.get(), g_ctx.get(), fgRegionTestDir);

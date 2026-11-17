@@ -46,6 +46,9 @@ struct FgLearner {
     void AddEvaluation(float currentDb, float candidateDb, float baselineDb, int mapSamples);
     // 처음이나 불러온 뒤에 첫 후보를 정한다.
     void Start(int mapSamples);
+    // 최근 채점에서 기준(보간은 단순 블렌딩, 외삽은 앞 프레임 그대로)보다 평균 몇 dB 좋은지.
+    // 공유할 데이터가 더 좋아졌는지 비교하는 값이다. evals에 평균 낸 채점 수를 담는다 (0이면 아직 없음).
+    float RecentGain(int& evals) const;
 
 private:
     void NextCandidate(int mapSamples);
@@ -60,8 +63,11 @@ private:
     int m_historyCount = 0;
 };
 
+// 공유를 권하는 최소 채점 수 (RecentGain이 이만큼 모였을 때)
+constexpr int kShareMinEvals = 200;
+
 struct GameProfile {
-    std::wstring name;
+    std::wstring name;             // 게임 이름 (실행 파일 이름). 공유한 파일을 가져올 때 이 이름으로 넣는다
     int genre = GENRE_GENERAL;     // 통계로 판단한 유형
 
     // 보간: 가운데 게임 프레임을 가리고 양옆으로 다시 만들어 채점한다 (블록 매칭 보간, RIFE를 쓰는 동안의 채점).
@@ -88,8 +94,14 @@ struct GameProfile {
     void AddFlowSample(const float* flow, int gridW, int gridH, int rowPitchFloats, double interval);
     void UpdateGenre();
 
-    bool Save(const std::wstring& dir) const;
-    bool Load(const std::wstring& path);
+    // 마지막으로 확대한 게임 화면 크기. 학습된 칸 크기가 원본 픽셀 단위라 공유할 때 참고로 남긴다.
+    int sourceW = 0, sourceH = 0;
+    std::string appVersion;        // 마지막으로 저장한 OpenScaler 버전
+
+    bool Save(const std::wstring& dir) const;      // dir 안에 게임 이름으로 저장한다
+    bool SaveTo(const std::wstring& path) const;   // 정한 경로에 저장한다 (공유용 내보내기)
+    bool Load(const std::wstring& path);           // name은 바꾸지 않는다
+    static std::wstring ReadName(const std::wstring& path);  // 파일에 적힌 게임 이름. 없으면 빈 문자열
 
 };
 

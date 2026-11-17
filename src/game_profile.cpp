@@ -78,6 +78,51 @@ std::vector<float> ReadArray(const std::string& text, const char* key)
     return out;
 }
 
+// 따옴표 안의 문자열 값. 이스케이프는 \" 와 \\ 만 쓴다.
+std::string ReadString(const std::string& text, const char* key)
+{
+    const char* p = FindKey(text, key);
+    if (!p) return {};
+    while (*p == ' ') p++;
+    if (*p != '"') return {};
+    std::string out;
+    for (p++; *p && *p != '"'; p++) {
+        if (*p == '\\' && p[1]) p++;
+        out += *p;
+    }
+    return out;
+}
+
+std::string EscapeJson(const std::string& s)
+{
+    std::string out;
+    for (char c : s) {
+        if (c == '"' || c == '\\') out += '\\';
+        if ((unsigned char)c >= 0x20) out += c;
+    }
+    return out;
+}
+
+std::string ToUtf8(const std::wstring& w)
+{
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+std::wstring FromUtf8(const std::string& s)
+{
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), w.data(), n);
+    return w;
+}
+
+const int kGainPoints = kShareMinEvals / kEvalsPerHistoryPoint;  // 개선 dB를 평균 낼 그래프 점 수
+
 void WriteArray(std::ostringstream& os, const char* key, const std::vector<float>& v, bool last = false)
 {
     os << "  \"" << key << "\": [";
@@ -103,6 +148,16 @@ void GameProfile::SetRegion(float x, float y, float w, float h)
     map.assign(map.size(), MapCell{});
     mapSamples = 0;
     genre = GENRE_GENERAL;
+}
+
+float FgLearner::RecentGain(int& evals) const
+{
+    const size_t n = std::min({ history.size(), baseline.size(), (size_t)kGainPoints });
+    evals = (int)n * kEvalsPerHistoryPoint;
+    if (n == 0) return 0;
+    double sum = 0;
+    for (size_t i = history.size() - n; i < history.size(); i++) sum += history[i] - baseline[i];
+    return (float)(sum / n);
 }
 
 void FgLearner::Start(int mapSamples)
@@ -291,7 +346,20 @@ void GameProfile::UpdateGenre()
 bool GameProfile::Save(const std::wstring& dir) const
 {
     CreateDirectoryW(dir.c_str(), nullptr);
+    return SaveTo(ProfilePath(dir, name));
+}
 
+std::wstring GameProfile::ReadName(const std::wstring& path)
+{
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return {};
+    std::stringstream ss;
+    ss << file.rdbuf();
+    return FromUtf8(ReadString(ss.str(), "name"));
+}
+
+bool GameProfile::SaveTo(const std::wstring& path) const
+{
     std::vector<float> mapValues;
     mapValues.reserve(map.size() * 5);
     for (const MapCell& m : map) {
@@ -305,6 +373,10 @@ bool GameProfile::Save(const std::wstring& dir) const
     std::ostringstream os;
     os << "{\n";
     os << "  \"version\": 1,\n";
+    os << "  \"name\": \"" << EscapeJson(ToUtf8(name)) << "\",\n";
+    os << "  \"app\": \"" << OPENSCALER_VERSION << "\",\n";
+    os << "  \"sourceW\": " << sourceW << ",\n";
+    os << "  \"sourceH\": " << sourceH << ",\n";
     os << "  \"genre\": " << genre << ",\n";
     // 보간 학습은 예전 파일과 같은 이름으로, 외삽 학습은 x_를 붙여 쓴다.
     for (int k = 0; k < 2; k++) {
@@ -329,7 +401,7 @@ bool GameProfile::Save(const std::wstring& dir) const
     WriteArray(os, "map", mapValues, true);
     os << "}\n";
 
-    std::ofstream file(ProfilePath(dir, name), std::ios::binary | std::ios::trunc);
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) return false;
     file << os.str();
     return file.good();
@@ -375,6 +447,9 @@ bool GameProfile::Load(const std::wstring& path)
     }
     genre = std::clamp((int)ReadNumber(text, "genre", genre), 0, GENRE_COUNT - 1);
     mapSamples = std::max(0, (int)ReadNumber(text, "mapSamples", 0));
+    sourceW = std::max(0, (int)ReadNumber(text, "sourceW", 0));
+    sourceH = std::max(0, (int)ReadNumber(text, "sourceH", 0));
+    appVersion = ReadString(text, "app");
     regionX = std::clamp((float)ReadNumber(text, "regionX", 0), 0.0f, 1.0f);
     regionY = std::clamp((float)ReadNumber(text, "regionY", 0), 0.0f, 1.0f);
     regionW = std::clamp((float)ReadNumber(text, "regionW", 0), 0.0f, 1.0f - regionX);

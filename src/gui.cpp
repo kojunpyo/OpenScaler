@@ -11,6 +11,7 @@
 #include "rife.h"
 #include "resource.h"
 
+#include <commdlg.h>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -147,7 +148,10 @@ const char* kRegionIdle = "확대를 시작하면 지정할 수 있어요";
 const char* kRegionNone = "지정한 영역 없음 · 화면 전체에 만들어요";
 const char* kRegionFormat = "지정한 영역: 가로 %d%% · 세로 %d%% (원본 %d×%d)";
 const char* kRegionEditing = "확대 화면에서 테두리를 끌어 조절하고 Enter로 저장해요";
-const char* kSecondaryTexts[] = { kRegionDesc, kRegionIdle, kRegionNone, kRegionFormat, kRegionEditing, kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
+const char* kLearnGainFormat = "%s 최근 채점 %d회 평균, 기준보다 %+.1f dB";
+const char* kShareNotYet = "채점이 200회 넘게 쌓이면 공유하기 좋아요";
+const char* kShareDesc = "잘 학습된 데이터를 파일로 주고받을 수 있어요. 방법은 저장소의 docs/sharing-profiles.md에 있어요.";
+const char* kSecondaryTexts[] = { kLearnGainFormat, kShareNotYet, kShareDesc, kRegionDesc, kRegionIdle, kRegionNone, kRegionFormat, kRegionEditing, kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
                                   kFgRifeFormat, kRifeLoading, kRifeFailed, kRifeMissing,
                                   kSlowMoDesc, kSlowMoIdle, kSlowMoPlan, kSlowMoWaiting, kSlowMoRecording, kSlowMoGenerating, kSlowMoPlaying,
                                   kLearnDesc, kLearnInterpFormat, kLearnExtrapFormat, kGraphLegend, kGraphLegendExtrap, kNoProfiles, kNoHistory,
@@ -612,6 +616,47 @@ std::wstring g_profileSelected;
 GameProfile g_profileView;
 bool g_profileViewValid = false;
 
+std::wstring g_shareMessage;  // 가져오기/내보내기 결과
+
+// 공유용 파일을 고르는 창. save면 저장할 위치를 고른다. 취소하면 빈 문자열
+std::wstring PickProfileFile(bool save, const std::wstring& defaultName)
+{
+    wchar_t path[MAX_PATH] = {};
+    wcsncpy_s(path, defaultName.c_str(), _TRUNCATE);
+    OPENFILENAMEW ofn = { sizeof(ofn) };
+    ofn.hwndOwner = g_hwnd;
+    ofn.lpstrFilter = L"OpenScaler 학습 데이터 (*.json)\0*.json\0모든 파일\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"json";
+    ofn.Flags = OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+    const BOOL ok = save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
+    return ok ? std::wstring(path) : std::wstring();
+}
+
+void ImportProfileButton()
+{
+    if (!ImGui::Button("공유 데이터 가져오기")) return;
+    const std::wstring file = PickProfileFile(false, L"");
+    if (file.empty()) return;
+    std::wstring name, message;
+    if (AppImportProfile(file, name, message)) {
+        g_profileSelected = name;
+        g_profileViewValid = false;
+        g_shareMessage = name + L": " + message;
+    } else {
+        g_shareMessage = message;
+    }
+}
+
+void DrawShareMessage()
+{
+    if (g_shareMessage.empty()) return;
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextUnformatted(ToUtf8(g_shareMessage).c_str());
+    ImGui::PopTextWrapPos();
+}
+
 void RefreshProfiles()
 {
     g_profileNames = ListProfiles(ProfilesDirectory());
@@ -666,6 +711,9 @@ void DrawLearning(const ScalingStatus& status)
 
     if (g_profileNames.empty() && !(active && active->interp.evalCount + active->extrap.evalCount > 0)) {
         Description(kNoProfiles);
+        Description(kShareDesc);
+        ImportProfileButton();
+        DrawShareMessage();
         return;
     }
 
@@ -718,6 +766,28 @@ void DrawLearning(const ScalingStatus& status)
     } else {
         Description(kNoHistory);
     }
+
+    // 공유: 기준보다 얼마나 좋은지로 더 좋아졌는지 비교한다.
+    bool enough = false;
+    for (int k = 0; k < 2; k++) {
+        int evals = 0;
+        const float gain = view->Learner(k == 1).RecentGain(evals);
+        if (evals == 0) continue;
+        char text[160];
+        snprintf(text, sizeof(text), kLearnGainFormat, k == 0 ? "보간:" : "외삽:", evals, gain);
+        Description(text);
+        enough = enough || evals >= kShareMinEvals;
+    }
+    if (!enough) Description(kShareNotYet);
+    Description(kShareDesc);
+    if (ImGui::Button("공유용으로 내보내기")) {
+        const std::wstring file = PickProfileFile(true, ProfilePath(L"", g_profileSelected).substr(1));
+        if (!file.empty())
+            g_shareMessage = AppExportProfile(g_profileSelected, file) ? L"내보냈어요: " + file : L"파일을 저장하지 못했어요.";
+    }
+    ImGui::SameLine();
+    ImportProfileButton();
+    DrawShareMessage();
 
     ImGui::BeginDisabled(isActive);
     if (ImGui::Button("이 게임 기록 지우기")) {

@@ -61,6 +61,12 @@ public:
     FrameGen(ID3D11Device* device, ID3D11DeviceContext* context);
 
     void SetProfile(GameProfile* profile) { m_profile = profile; }
+    // 프로필 내용을 통째로 바꿨을 때 (공유받은 데이터를 가져옴): 화면 지도를 다시 올리고 처음부터 쌓는다
+    void ProfileReloaded()
+    {
+        m_mapUploaded = -1;
+        Reset();
+    }
     void Reset();
 
     // 새 진짜 프레임. time은 캡처 시각(초)
