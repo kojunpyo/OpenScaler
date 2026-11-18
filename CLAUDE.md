@@ -35,7 +35,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 - `src/gui.cpp`: 설정 창 (Dear ImGui 1.91.5)
 - `src/shaders.h`: 실행 중에 컴파일하는 HLSL (업스케일, 샤프닝, 커서)
 - `src/framegen.*`, `src/framegen_shaders.h`: 프레임 생성 (움직임 추정, 합성, 표시 시점, 채점)
-- `src/framegen_test.*`: 프레임 생성 자체 테스트 (`--fg-selftest 폴더`, 화면과 마우스를 쓰지 않음). RIFE 속도는 `--rife-bench 폴더`
+- `src/framegen_test.*`: 프레임 생성 자체 테스트 (`--fg-selftest 폴더`, 화면과 마우스를 쓰지 않음). RIFE 속도는 `--rife-bench 폴더`, 영역 결과는 `--fg-regiontest 폴더`, 영역 계산 시간은 `--fg-regionbench 덤프 폴더 [x,y,w,h]`
 - `src/game_profile.*`: 게임별 프로필 (설정 자동 조정, 화면 지도, `profiles/*.json`)
 - `src/rife.*`: RIFE 실행 (실행 파일 옆 `rife` 폴더의 ONNX Runtime과 모델을 실행 중에 불러옴). `tools/rife_export.py`: 모델 변환
 - `src/fsr.hlsl`, `src/fsr_constants.*`: FSR 1.0. fxc로 빌드 때 컴파일
@@ -48,7 +48,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 
 ## 현재 상태
 
-- 코드 버전 1.3.1, 공개 릴리스 v1.3.1 (2026-11-18, 기기 확인용 기록 보강. v1.3.0에서 프레임 생성 영역과 학습 데이터 공유 추가). 남은 것은 고주사율 기기 확인과 그 결과에 따른 개선이다.
+- 코드 버전 1.3.2, 공개 릴리스 v1.3.2 (2026-11-18, 영역 계산 시간 벤치마크와 README 목차. v1.3.0에서 프레임 생성 영역과 학습 데이터 공유 추가). README 제목에는 번호가 붙어 있으니 앵커 링크는 `#4-게임별-학습`처럼 번호까지 쓴다. 남은 것은 고주사율 기기 확인과 그 결과에 따른 개선이다.
 - 지켜야 할 결정:
   - 프레임 생성 방식은 블록 매칭 보간(기본값) / RIFE 보간 / 블록 매칭 외삽 하나로 고른다 (`FgModeOf`, `SetFgMode`). 게임별 학습이 블록 매칭에만 적용되므로 블록 매칭이 기본값이다.
   - 게임별 학습은 보간용과 외삽용을 따로 둔다 (`GameProfile::interp`, `extrap`, 프로필의 `x_` 값). RIFE는 학습되지 않는다.

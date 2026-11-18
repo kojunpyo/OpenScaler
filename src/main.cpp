@@ -1949,6 +1949,8 @@ int wmain(int argc, wchar_t** argv)
     //             --no-gui (설정 창 없이 실행) --console (로그를 보여 줄 콘솔 창 열기)
     std::wstring targetTitle;
     std::wstring fgRegionTestDir;
+    std::wstring regionBenchDump, regionBenchOut;
+    float regionBench[4] = { 0.25f, 0.0f, 0.5f, 1.0f };
     std::wstring importProfile, exportProfileName, exportProfileFile;  // 학습 데이터 공유 (설정 창 버튼과 같다)
     std::wstring fgSelfTestDir, rifeBenchDir, fgGapTestDump, fgGapTestOut, fgGapTestProfile;
     double duration = 0;
@@ -1975,6 +1977,15 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--cursor-speed") g_settings.adjustCursorSpeed = true;
         else if (a == L"--fg-selftest" && i + 1 < argc) fgSelfTestDir = argv[++i];
         else if (a == L"--fg-regiontest" && i + 1 < argc) fgRegionTestDir = argv[++i];
+        else if (a == L"--fg-regionbench" && i + 2 < argc) {
+            // 덤프 폴더, 결과 폴더, [x,y,w,h]
+            regionBenchDump = argv[++i];
+            regionBenchOut = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] != L'-') {
+                float r[4];
+                if (swscanf_s(argv[++i], L"%f,%f,%f,%f", &r[0], &r[1], &r[2], &r[3]) == 4) std::copy(r, r + 4, regionBench);
+            }
+        }
         else if (a == L"--import-profile" && i + 1 < argc) importProfile = argv[++i];
         else if (a == L"--export-profile" && i + 2 < argc) {
             exportProfileName = argv[++i];
@@ -2047,6 +2058,11 @@ int wmain(int argc, wchar_t** argv)
             printf("[내보내기] %s\n", ok ? "완료" : "실패");
             MagUninitialize();
             return ok ? 0 : 1;
+        }
+        if (!regionBenchDump.empty()) {
+            exitCode = RunFrameGenRegionBench(g_device.get(), g_ctx.get(), regionBenchDump, regionBenchOut, regionBench);
+            MagUninitialize();
+            return exitCode;
         }
         if (!fgRegionTestDir.empty()) {
             exitCode = RunFrameGenRegionTest(g_device.get(), g_ctx.get(), fgRegionTestDir);

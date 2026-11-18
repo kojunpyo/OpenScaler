@@ -870,3 +870,123 @@ int RunRifeBench(const std::wstring& outDir)
     }
     return 0;
 }
+
+// 영역 계산 시간 비교: 슬로모션 덤프의 게임 프레임을 화면 전체와 영역으로 번갈아 처리하며 GPU 시간을 잰다.
+// 실시간 기록은 게임 화면의 움직임과 GPU 클럭에 따라 흔들리므로, 같은 프레임을 번갈아 넣어 그 영향을 줄인다.
+int RunFrameGenRegionBench(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& dumpDir, const std::wstring& outDir,
+                           const float region[4])
+{
+    std::vector<std::wstring> names;
+    WIN32_FIND_DATAW fd;
+    HANDLE find = FindFirstFileW((dumpDir + L"\\frame_*_real.bmp").c_str(), &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+        do names.push_back(fd.cFileName);
+        while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+    std::sort(names.begin(), names.end());
+    std::vector<winrt::com_ptr<ID3D11Texture2D>> textures;
+    int w = 0, h = 0;
+    std::vector<uint32_t> previous;
+    for (auto& name : names) {
+        std::vector<uint32_t> rgba;
+        int fw, fh;
+        if (!LoadBmp(dumpDir + L"\\" + name, rgba, fw, fh) || rgba == previous) continue;
+        if (w && (fw != w || fh != h)) continue;
+        w = fw;
+        h = fh;
+        std::vector<uint32_t> bgra(rgba.size());
+        for (size_t i = 0; i < rgba.size(); i++) {
+            const uint32_t c = rgba[i];
+            bgra[i] = (c & 0xFF00FF00) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF);
+        }
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA data = { bgra.data(), (UINT)w * 4, 0 };
+        winrt::com_ptr<ID3D11Texture2D> tex;
+        winrt::check_hresult(device->CreateTexture2D(&td, &data, tex.put()));
+        textures.push_back(tex);
+        previous = std::move(rgba);
+    }
+    if (textures.size() < 4) {
+        printf("진짜 프레임이 부족합니다: %zu장\n", textures.size());
+        return 1;
+    }
+    MakeDirectories(outDir);
+
+    // GPU 시간: 타임스탬프 쿼리로 감싸고 결과가 나올 때까지 기다린다 (실시간이 아니므로 기다려도 된다).
+    D3D11_QUERY_DESC disjointDesc = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 }, stampDesc = { D3D11_QUERY_TIMESTAMP, 0 };
+    winrt::com_ptr<ID3D11Query> disjoint, begin, end;
+    winrt::check_hresult(device->CreateQuery(&disjointDesc, disjoint.put()));
+    winrt::check_hresult(device->CreateQuery(&stampDesc, begin.put()));
+    winrt::check_hresult(device->CreateQuery(&stampDesc, end.put()));
+    auto timed = [&](const std::function<void()>& work) {
+        context->Begin(disjoint.get());
+        context->End(begin.get());
+        work();
+        context->End(end.get());
+        context->End(disjoint.get());
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {};
+        UINT64 t0 = 0, t1 = 0;
+        while (context->GetData(disjoint.get(), &dj, sizeof(dj), 0) != S_OK) {}
+        while (context->GetData(begin.get(), &t0, sizeof(t0), 0) != S_OK) {}
+        while (context->GetData(end.get(), &t1, sizeof(t1), 0) != S_OK) {}
+        return dj.Disjoint || dj.Frequency == 0 ? -1.0 : (double)(t1 - t0) * 1000.0 / dj.Frequency;
+    };
+
+    FrameGen full(device, context), part(device, context);
+    FgOptions fullOptions, partOptions;
+    fullOptions.learn = partOptions.learn = false;
+    fullOptions.refreshHz = partOptions.refreshHz = 240;  // 게임 프레임 사이에 넣을 자리가 있게 한다
+    partOptions.regionX = (int)std::lround(region[0] * w);
+    partOptions.regionY = (int)std::lround(region[1] * h);
+    partOptions.regionW = (int)std::lround((region[0] + region[2]) * w) - partOptions.regionX;
+    partOptions.regionH = (int)std::lround((region[1] + region[3]) * h) - partOptions.regionY;
+    const double interval = 1.0 / 60.0;
+    const int kWarmup = 60, kIterations = 400;
+    std::vector<double> est[2], syn[2];
+    std::ofstream csv(outDir + L"\\fg_regionbench.csv");
+    csv << "iteration,kind,estimate_ms,synth_ms\n";
+    printf("[영역 계산 시간] %dx%d, 영역 (%d, %d) %dx%d, 게임 프레임 %zu장을 번갈아 %d번\n", w, h, partOptions.regionX, partOptions.regionY,
+           partOptions.regionW, partOptions.regionH, textures.size(), kIterations);
+    for (int i = 0; i < kWarmup + kIterations; i++) {
+        ID3D11Texture2D* tex = textures[i % textures.size()].get();
+        const double time = i * interval;
+        // 어느 쪽을 먼저 돌리는지도 번갈아 바꿔 순서의 영향을 없앤다.
+        for (int order = 0; order < 2; order++) {
+            const int kind = (i + order) % 2;  // 0: 화면 전체, 1: 영역
+            FrameGen& fg = kind == 0 ? full : part;
+            const FgOptions& options = kind == 0 ? fullOptions : partOptions;
+            const double e = timed([&] { fg.PushFrame(tex, w, h, time, options); });
+            // 표시 두 번 (게임 프레임 하나에 생성 프레임 두 장을 넣는 경우)
+            double s = 0;
+            for (int k = 1; k <= 2; k++) s += timed([&] { fg.Render(time + interval * k / 3.0, options); });
+            if (i < kWarmup || e < 0 || s < 0) continue;
+            est[kind].push_back(e);
+            syn[kind].push_back(s / 2);
+            csv << i - kWarmup << "," << (kind == 0 ? "full" : "region") << "," << e << "," << s / 2 << "\n";
+        }
+    }
+    auto median = [](std::vector<double> v) {
+        if (v.empty()) return 0.0;
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        return v[v.size() / 2];
+    };
+    const double area = (double)partOptions.regionW * partOptions.regionH / ((double)w * h);
+    const double e0 = median(est[0]), e1 = median(est[1]), s0 = median(syn[0]), s1 = median(syn[1]);
+    printf("%-10s %14s %14s\n", "", "움직임 찾기", "합성 (1장)");
+    printf("%-10s %11.3f ms %11.3f ms\n", "화면 전체", e0, s0);
+    printf("%-10s %11.3f ms %11.3f ms\n", "영역", e1, s1);
+    printf("넓이 %.0f%% -> 움직임 찾기 %.0f%%, 합성 %.0f%% (화면 전체 대비, 중앙값)\n", area * 100, e0 > 0 ? e1 / e0 * 100 : 0, s0 > 0 ? s1 / s0 * 100 : 0);
+    std::ofstream summary(outDir + L"\\fg_regionbench_summary.csv");
+    summary << "width,height,region_w,region_h,area,full_estimate_ms,region_estimate_ms,full_synth_ms,region_synth_ms\n";
+    summary << w << "," << h << "," << partOptions.regionW << "," << partOptions.regionH << "," << area << "," << e0 << "," << e1 << "," << s0 << ","
+            << s1 << "\n";
+    return 0;
+}

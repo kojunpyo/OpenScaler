@@ -12,7 +12,7 @@
 #   python -I tools/test/fgquality.py 결과폴더/gap/fg_gaptest.csv  (화질 등급)
 # 실행 전에 게임을 창 모드로 켜 두고, 기록하는 동안 화면이 계속 움직이도록 게임을 조작한다.
 # 단계: 기기 정보 -> RIFE 속도 -> RIFE, 블록 매칭, 외삽, 블록 매칭+영역 (게임 fps = 주사율 절반)
-#       -> 블록 매칭 (게임 fps = 주사율의 0.4배, 정수배가 아닌 배수) -> 화질 측정 덤프 -> 학습 데이터 복사
+#       -> 블록 매칭 (게임 fps = 주사율의 0.4배, 정수배가 아닌 배수) -> 화질 측정 덤프 -> 영역 계산 시간 비교 -> 학습 데이터 복사
 $ErrorActionPreference = "Stop"
 if (-not $Exe) {
   # 릴리스 zip에서는 tools 폴더 안에 있으므로 한 단계 위도 찾는다.
@@ -89,7 +89,13 @@ Ask "[7/7] 화질 측정 녹화 전에 게임의 최대 fps 제한을 풀어 주
 Countdown "[7/7] 화질 측정 녹화: 5초 뒤부터 2초 동안 녹화합니다. 화면이 움직이도록 계속 조작하세요"
 Run-OpenScaler "--no-gui --target `"$Target`" --fg --fg-rife --fg-region none --slowmo-auto 5 --slowmo-seconds 2 --slowmo-dump `"$Out\dump`" --duration 40" 70
 
-# 6. 이 기기에서 쌓인 학습 데이터를 함께 가져간다 (공유 후보와 학습 경과 확인용).
+# 6. 영역 계산 시간 비교: 덤프의 게임 프레임을 화면 전체와 영역으로 번갈아 처리한다 (게임 조작 필요 없음).
+# 실시간 기록의 GPU 시간은 게임 화면과 클럭에 따라 흔들리므로, 영역 효과는 이 결과로 판단한다.
+Write-Host "`n영역 계산 시간 비교 (게임을 조작하지 않아도 됩니다)"
+Run-OpenScaler "--no-gui --fg-regionbench `"$Out\dump`" `"$Out\regionbench`" $Region" 300
+if (Test-Path "$Out\regionbench\fg_regionbench_summary.csv") { Get-Content "$Out\regionbench\fg_regionbench_summary.csv" | Write-Host }
+
+# 7. 이 기기에서 쌓인 학습 데이터를 함께 가져간다 (공유 후보와 학습 경과 확인용).
 $profiles = Join-Path (Split-Path $Exe) "profiles"
 if (Test-Path $profiles) {
   New-Item -ItemType Directory -Force "$Out\profiles" | Out-Null

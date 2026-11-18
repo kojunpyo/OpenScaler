@@ -16,6 +16,10 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
 // 프레임 생성 영역 시험: 영역 안은 그 부분만 넣었을 때와 같고, 영역 밖은 게임 프레임 그대로인지 확인한다.
 int RunFrameGenRegionTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& outDir);
 
+// 영역 계산 시간 비교: 슬로모션 덤프의 게임 프레임을 화면 전체와 영역(x, y, 너비, 높이 비율)으로 번갈아 처리하며 GPU 시간을 잰다.
+int RunFrameGenRegionBench(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& dumpDir, const std::wstring& outDir,
+                           const float region[4]);
+
 // RIFE 신경망 시간만 입력 크기별로 잰다. 화면과 캡처를 쓰지 않는다.
 int RunRifeBench(const std::wstring& outDir);
 
