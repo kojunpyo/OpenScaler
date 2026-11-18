@@ -1567,16 +1567,22 @@ static void RenderFrame()
                 frameTime = NowSeconds();
             }
             FgOptions options = CurrentFgOptions(s);
+            // CPU가 프레임 생성에 머문 시간 (GPU 결과를 기다리느라 멈추면 여기서 길어진다)
+            const double pushStart = NowSeconds();
             if (newFrame) g_frameGen->PushFrame(s->srcTex.get(), s->srcW, s->srcH, frameTime, options);
             double now = NowSeconds();
+            const double pushMs = (now - pushStart) * 1000.0;
             if (auto generated = g_frameGen->Render(now, options)) {
                 displaySrv = generated;
                 if (auto held = g_frameGen->HeldFrame()) compareSrv = held;
             }
+            const double renderMs = (NowSeconds() - now) * 1000.0;
             if (g_fgLog) {
                 const FgStats& st = g_frameGen->Stats();
-                fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f,%d,%.3f,%.3f,%d,%d\n", now, st.displayT, st.realFrames, st.duplicates,
-                        st.rifeShown, st.rifeMissed, st.rifeMs, st.contentTime, st.rifeHeight, st.estimateMs, st.synthMs, st.workW, st.workH);
+                fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f,%d,%.3f,%.3f,%d,%d,%.3f,%.3f,%.2f,%.2f,%.2f,%.2f\n", now, st.displayT, st.realFrames,
+                        st.duplicates, st.rifeShown, st.rifeMissed, st.rifeMs, st.contentTime, st.rifeHeight, st.estimateMs, st.synthMs, st.workW,
+                        st.workH, pushMs, renderMs, st.acceptLagMs, st.rifeLagMs, st.rifeLagLastMs,
+                        newFrame ? (pushStart - frameTime) * 1000.0 : -1.0);
             }
         } else if (s->fgWasOn && !g_settings.frameGen) {
             g_frameGen->SetProfile(nullptr);
@@ -2081,7 +2087,9 @@ int wmain(int argc, wchar_t** argv)
         }
         RegisterHotkeys();
         g_frameGenLoading = std::async(std::launch::async, [] {
-            return std::make_unique<FrameGen>(g_device.get(), g_ctx.get());
+            auto frameGen = std::make_unique<FrameGen>(g_device.get(), g_ctx.get());
+            frameGen->SetRealtime(true);
+            return frameGen;
         });
         if (useGui && !GuiCreate(g_device.get(), g_ctx.get())) {
             printf("설정 창을 만들지 못했습니다. 단축키로만 사용할 수 있습니다.\n");

@@ -55,6 +55,11 @@ struct FgStats {
     double rifeMs = 0;         // 신경망 한 번에 걸린 시간
     long long rifeShown = 0;   // RIFE로 합성해 보여 준 횟수
     long long rifeMissed = 0;  // 결과가 늦어 블록 매칭으로 대신한 횟수
+
+    // 실시간에서 GPU 결과를 기다리지 않아 생긴 지연 (최근 값의 90%가 이 안에 든다)
+    double acceptLagMs = 0;    // 게임 프레임을 넘긴 뒤 받아들일 때까지 (중복 검사 결과를 기다림)
+    double rifeLagMs = 0;      // 게임 프레임이 캡처된 뒤 RIFE 결과가 나올 때까지
+    double rifeLagLastMs = 0;  // 마지막 결과 하나의 값
 };
 
 class FrameGen {
@@ -70,7 +75,10 @@ public:
     }
     void Reset();
 
-    // 새 진짜 프레임. time은 캡처 시각(초)
+    // 실시간 경로에서 켠다: GPU 결과를 기다리지 않고 다음 화면에서 확인한다. RIFE가 GPU를 쓰는 동안 기다리면
+    // 신경망이 끝날 때까지 화면을 그리지 못해 끊긴다. 끄면(기본값) 바로 기다려서 테스트 결과가 실행마다 같다.
+    void SetRealtime(bool realtime) { m_realtime = realtime; }
+    // 새 진짜 프레임. time은 캡처 시각(초, QueryPerformanceCounter 기준)
     void PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, const FgOptions& options);
     // 지금 화면에 보여 줄 영상. 아직 프레임이 없으면 nullptr
     ID3D11ShaderResourceView* Render(double now, const FgOptions& options);
@@ -218,13 +226,38 @@ private:
     void QueueMse(ID3D11ShaderResourceView* x, ID3D11ShaderResourceView* y, int group, int index);
     float MseFromStaging(ID3D11Texture2D* staging, UINT w, UINT h);
     float BlockingMsePsnr(ID3D11ShaderResourceView* x, ID3D11ShaderResourceView* y);
-    bool IsDuplicate(const Frame& a, const Frame& b);
+    com_ptr<ID3D11Texture2D> QueueDuplicate(const Frame& a, const Frame& b);  // 두 프레임의 차이를 읽어 올 준비를 한다
+    bool ReadDuplicate(ID3D11Texture2D* staging, bool block, bool& same);     // GPU가 아직 끝내지 않았으면 false
+    bool IsDuplicate(const Frame& a, const Frame& b);                          // 기다려서 바로 판단한다 (슬로모션 녹화)
 
     void RunEvaluation(const FgOptions& options);
     FgParams LearnedParams(const FgOptions& options) const;  // 이 게임에서 지금 방식(보간/외삽)으로 학습한 값
     void QueueFlowSample(const FlowSet& set, double interval);
     void PollReadbacks();
     void UpdateMapTexture();
+
+    // 빈 슬롯의 새 프레임: 중복 검사 결과가 나오면 받아들이거나 버린다. 기다리는 동안 다음 캡처가 오면 그때는 기다린다.
+    struct Incoming {
+        bool waiting = false;
+        com_ptr<ID3D11Texture2D> staging;  // 중복 검사 결과 (앞 프레임이 없었으면 비어 있음)
+        double time = 0;
+        double pushed = 0;  // PushFrame을 부른 시각 (GPU를 기다린 시간만 재려고)
+        FgOptions options;
+    };
+    void ResolveIncoming(bool block);  // block이면 결과가 나올 때까지 기다린다
+    void AcceptIncoming(double time, const FgOptions& options);
+    double PushLag(std::deque<double>& lags, double lag, double& statMs);  // 중앙값을 돌려준다
+
+    // RIFE 입력으로 줄인 게임 프레임을 GPU에서 읽어 오는 중인 것
+    struct RifeReadback {
+        com_ptr<ID3D11Texture2D> staging;
+        long long seq = 0;
+        bool pairValid = false;  // 앞 프레임과 쌍이 되는지
+        UINT w = 0, h = 0;
+    };
+    void RifeQueue(const Frame& f, long long seq);
+    void RifePoll(bool block);  // 읽어 온 프레임을 앞 프레임과 짝지어 신경망에 넘긴다
+    std::vector<float> RifeConvert(const D3D11_MAPPED_SUBRESOURCE& mapped) const;
 
     bool EnsureRife(int quality, bool adapt);  // 원하는 입력 크기로 돌 수 있으면 true
     std::vector<float> RifePrepare(const Frame& f);
@@ -290,6 +323,13 @@ private:
     Target m_rifeInput;
     std::array<RifeFlow, 2> m_rifeResults;  // 0이 최신. 표시 시계가 앞 쌍에 있을 때를 위해 두 쌍을 보관한다
     std::vector<float> m_rifePrevious;  // 앞 프레임의 신경망 입력 (다시 줄이지 않도록 보관)
+    long long m_rifePreviousSeq = -1;
+    std::deque<RifeReadback> m_rifeReadbacks;
+    std::deque<std::pair<long long, double>> m_rifeTimes;  // 게임 프레임 번호와 캡처 시각 (결과의 지연을 재려고)
+    std::deque<double> m_acceptLags, m_rifeLags;            // 최근 지연 (초)
+    double m_rifeLagMedianMs = 0;
+    bool m_realtime = false;
+    Incoming m_incoming;
     int m_rifeHeightLimit = 10000;      // 너무 느려서 낮춘 입력 높이. 이번 실행 동안 유지한다
     float m_rifeLastInferMs = 0;
 

@@ -38,6 +38,27 @@ const double kRifeBudget = 0.7;      // 신경망이 프레임 간격의 이 비
 const double kSlowMoWarmup = 0.25;   // 슬로모션 녹화 직후 드라이버가 자리를 잡는 동안의 프레임은 쓰지 않는다 (초)
 const double kLongGap = 2.5;         // 보통 간격의 이 배수를 넘는 쌍은 긴 간격으로 보고 추정 설정을 바꾼다
 const float kDuplicateMse = 2e-7f;   // 1/8 영상의 한 묶음이 이보다 달라야 새 프레임으로 본다 (8비트 반올림 오차 수준)
+// 실시간에서 GPU 결과를 기다리는 최대 시간 (초). GPU가 한가하면 이 안에 끝나 지연이 늘지 않고,
+// RIFE가 GPU를 쓰고 있으면 기다리지 않고 다음 화면에서 다시 확인한다.
+const double kQuickWait = 0.002;
+const size_t kLagSamples = 30;       // 지연을 정할 때 보는 최근 값의 수
+
+double Seconds()
+{
+    LARGE_INTEGER counter, frequency;
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    return double(counter.QuadPart) / double(frequency.QuadPart);
+}
+
+// GPU 작업을 바로 보내고, 끝났는지 짧게 확인한다.
+template <class Done>
+void WaitBriefly(ID3D11DeviceContext* ctx, Done done)
+{
+    ctx->Flush();
+    const double until = Seconds() + kQuickWait;
+    while (!done() && Seconds() < until) YieldProcessor();
+}
 
 float PsnrFromMse(float mse)
 {
@@ -153,6 +174,14 @@ void FrameGen::Reset()
     m_evalCurrentGroup = -1;
     m_clock = m_lastRender = 0;
     m_rifePrevious.clear();
+    m_rifePreviousSeq = -1;
+    m_rifeReadbacks.clear();
+    m_rifeTimes.clear();
+    m_acceptLags.clear();
+    m_rifeLags.clear();
+    m_stats.acceptLagMs = m_stats.rifeLagMs = 0;
+    m_rifeLagMedianMs = 0;
+    m_incoming = Incoming();
     for (auto& result : m_rifeResults) result.seq = -1;
     for (auto& set : m_flowSets) set.hasHistory = false;
 }
@@ -635,7 +664,7 @@ void FrameGen::TimerPoll(GpuTimer& timer)
 // 게임이 그리지 않았는데도 캡처 프레임이 올 수 있다 (30fps 게임에서 60번씩).
 // 이것을 진짜 프레임으로 세면 프레임 간격이 틀어지고 멈춘 프레임 사이를 보간하게 되므로 걸러 낸다.
 // 작은 결과 하나만 기다려 읽는다. 이 판단이 늦으면 다음 프레임까지 밀리므로 비동기로 하지 않는다.
-bool FrameGen::IsDuplicate(const Frame& a, const Frame& b)
+com_ptr<ID3D11Texture2D> FrameGen::QueueDuplicate(const Frame& a, const Frame& b)
 {
     D3D11_TEXTURE2D_DESC td;
     m_duplicateMse.tex->GetDesc(&td);
@@ -649,9 +678,18 @@ bool FrameGen::IsDuplicate(const Frame& a, const Frame& b)
 
     auto staging = GetStaging(td.Width, td.Height, td.Format);
     m_ctx->CopyResource(staging.get(), m_duplicateMse.tex.get());
+    return staging;
+}
+
+bool FrameGen::ReadDuplicate(ID3D11Texture2D* staging, bool block, bool& same)
+{
+    D3D11_TEXTURE2D_DESC td;
+    staging->GetDesc(&td);
     D3D11_MAPPED_SUBRESOURCE mapped;
-    check_hresult(m_ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped));
-    bool same = true;
+    HRESULT hr = m_ctx->Map(staging, 0, D3D11_MAP_READ, block ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return false;
+    check_hresult(hr);
+    same = true;
     for (UINT y = 0; y < td.Height && same; y++) {
         auto row = reinterpret_cast<const float*>(static_cast<const char*>(mapped.pData) + (size_t)y * mapped.RowPitch);
         for (UINT x = 0; x < td.Width; x++) {
@@ -661,9 +699,47 @@ bool FrameGen::IsDuplicate(const Frame& a, const Frame& b)
             }
         }
     }
-    m_ctx->Unmap(staging.get(), 0);
-    RecycleStaging(staging);
+    m_ctx->Unmap(staging, 0);
+    return true;
+}
+
+bool FrameGen::IsDuplicate(const Frame& a, const Frame& b)
+{
+    auto staging = QueueDuplicate(a, b);
+    bool same = false;
+    ReadDuplicate(staging.get(), true, same);
+    RecycleStaging(std::move(staging));
     return same;
+}
+
+void FrameGen::ResolveIncoming(bool block)
+{
+    if (!m_incoming.waiting) return;
+    bool same = false;
+    if (m_incoming.staging) {
+        if (!ReadDuplicate(m_incoming.staging.get(), block, same)) return;
+        RecycleStaging(std::move(m_incoming.staging));
+    }
+    m_incoming.waiting = false;
+    if (m_realtime) PushLag(m_acceptLags, Seconds() - m_incoming.pushed, m_stats.acceptLagMs);
+    if (same) {
+        // 영역 안이 같아도 영역 밖은 바뀌었을 수 있으므로 최신 프레임의 전체 화면은 새것으로 바꿔 둔다.
+        if (m_region) m_ctx->CopyResource(m_frames[0].full.get(), m_frames[kFrames - 1].full.get());
+        m_stats.duplicates++;
+        return;
+    }
+    AcceptIncoming(m_incoming.time, m_incoming.options);
+}
+
+double FrameGen::PushLag(std::deque<double>& lags, double lag, double& statMs)
+{
+    lags.push_back(lag);
+    if (lags.size() > kLagSamples) lags.pop_front();
+    // 최근 값 중 두 번째로 큰 값: 가끔 튀는 한 번에 끌려가지 않으면서 대부분을 기다릴 수 있다.
+    std::vector<double> sorted(lags.begin(), lags.end());
+    std::sort(sorted.begin(), sorted.end());
+    statMs = sorted[sorted.size() >= 2 ? sorted.size() - 2 : 0] * 1000.0;
+    return sorted[sorted.size() / 2] * 1000.0;  // 중앙값
 }
 
 void FrameGen::PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, const FgOptions& options)
@@ -674,23 +750,38 @@ void FrameGen::PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, c
     if (rw < kMinRegion || rh < kMinRegion) rw = rh = 0;
     EnsureFrames(w, h, rx, ry, rw, rh);
 
+    // 빈 슬롯이 하나뿐이므로, 앞 캡처의 중복 검사 결과를 아직 못 받았으면 지금 기다린다.
+    // 앞 캡처는 한 화면 이상 전에 보냈으므로 대개 이미 끝나 있다.
+    if (m_incoming.waiting) ResolveIncoming(true);
+
     // 빈 슬롯에 받아 보고, 앞 프레임과 같으면 버린다.
     Frame& incoming = m_frames[kFrames - 1];
     if (m_region) {
         const D3D11_BOX box = { m_regionX, m_regionY, 0, m_regionX + m_w, m_regionY + m_h, 1 };
         m_ctx->CopySubresourceRegion(incoming.color.get(), 0, 0, 0, 0, source, 0, &box);
+        m_ctx->CopyResource(incoming.full.get(), source);
     } else {
         m_ctx->CopyResource(incoming.color.get(), source);
     }
     BuildPyramid(incoming);
-    if (m_count > 0 && IsDuplicate(incoming, m_frames[0])) {
-        // 영역 안이 같아도 영역 밖은 바뀌었을 수 있으므로 최신 프레임의 전체 화면은 새것으로 바꿔 둔다.
-        if (m_region) m_ctx->CopyResource(m_frames[0].full.get(), source);
-        m_stats.duplicates++;
+    m_incoming.waiting = true;
+    m_incoming.time = time;
+    m_incoming.pushed = Seconds();
+    m_incoming.options = options;
+    m_incoming.staging = m_count > 0 ? QueueDuplicate(incoming, m_frames[0]) : nullptr;
+    if (!m_realtime) {
+        ResolveIncoming(true);
         return;
     }
-    if (m_region) m_ctx->CopyResource(incoming.full.get(), source);
+    // 실시간: GPU가 RIFE로 바쁘면 결과를 기다리지 않고 화면을 그릴 때 다시 확인한다.
+    WaitBriefly(m_ctx.get(), [&] {
+        ResolveIncoming(false);
+        return !m_incoming.waiting;
+    });
+}
 
+void FrameGen::AcceptIncoming(double time, const FgOptions& options)
+{
     std::rotate(m_frames.begin(), m_frames.end() - 1, m_frames.end());
     Frame& f = m_frames[0];
     f.time = time;
@@ -755,10 +846,14 @@ void FrameGen::PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, c
     if (options.generator == FG_GENERATOR_RIFE && options.method == FG_METHOD_INTERPOLATE) {
         EnsureRife(options.quality, true);
         if (m_rife && m_rife->GetState() == RifeEngine::STATE_READY) {
-            std::vector<float> current = RifePrepare(f);
-            if (m_pairValid && m_rifePrevious.size() == current.size())
-                m_rife->Submit(m_stats.realFrames, m_rifePrevious, current, (int)m_rifeW, (int)m_rifeH);
-            m_rifePrevious = std::move(current);
+            if (m_realtime) {
+                RifeQueue(f, m_stats.realFrames);
+            } else {
+                std::vector<float> current = RifePrepare(f);
+                if (m_pairValid && m_rifePrevious.size() == current.size())
+                    m_rife->Submit(m_stats.realFrames, m_rifePrevious, current, (int)m_rifeW, (int)m_rifeH);
+                m_rifePrevious = std::move(current);
+            }
         }
     }
 }
@@ -798,6 +893,7 @@ bool FrameGen::EnsureRife(int quality, bool adapt)
         m_rifeH = activeH;
         m_rifeInput = MakeTarget(activeW, activeH, DXGI_FORMAT_R8G8B8A8_UNORM, true);
         m_rifePrevious.clear();
+        m_rifePreviousSeq = -1;
     }
     return activeW == w && activeH == h;
 }
@@ -813,7 +909,58 @@ std::vector<float> FrameGen::RifePrepare(const Frame& f)
     m_ctx->CopyResource(staging.get(), m_rifeInput.tex.get());
     D3D11_MAPPED_SUBRESOURCE mapped;
     check_hresult(m_ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped));
+    std::vector<float> out = RifeConvert(mapped);
+    m_ctx->Unmap(staging.get(), 0);
+    RecycleStaging(staging);
+    return out;
+}
 
+void FrameGen::RifeQueue(const Frame& f, long long seq)
+{
+    Cb cb = BaseCb(nullptr);
+    cb.lvlSize[0] = (int)m_rifeW;
+    cb.lvlSize[1] = (int)m_rifeH;
+    Run(m_csResize.get(), { f.colorSrv.get() }, m_rifeInput.uav.get(), cb, (m_rifeW + 7) / 8, (m_rifeH + 7) / 8);
+    RifeReadback r;
+    r.staging = GetStaging(m_rifeW, m_rifeH, DXGI_FORMAT_R8G8B8A8_UNORM);
+    m_ctx->CopyResource(r.staging.get(), m_rifeInput.tex.get());
+    r.seq = seq;
+    r.pairValid = m_pairValid;
+    r.w = m_rifeW;
+    r.h = m_rifeH;
+    m_rifeReadbacks.push_back(std::move(r));
+    m_rifeTimes.emplace_back(seq, f.time);
+    if (m_rifeTimes.size() > 8) m_rifeTimes.pop_front();
+    WaitBriefly(m_ctx.get(), [&] {
+        RifePoll(false);
+        return m_rifeReadbacks.empty();
+    });
+}
+
+void FrameGen::RifePoll(bool block)
+{
+    while (!m_rifeReadbacks.empty()) {
+        RifeReadback& r = m_rifeReadbacks.front();
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        HRESULT hr = m_ctx->Map(r.staging.get(), 0, D3D11_MAP_READ, block ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return;
+        check_hresult(hr);
+        // 읽는 동안 입력 크기가 바뀌었으면 버린다.
+        if (r.w == m_rifeW && r.h == m_rifeH && m_rife && m_rife->GetState() == RifeEngine::STATE_READY) {
+            std::vector<float> current = RifeConvert(mapped);
+            if (r.pairValid && m_rifePreviousSeq == r.seq - 1 && m_rifePrevious.size() == current.size())
+                m_rife->Submit(r.seq, m_rifePrevious, current, (int)r.w, (int)r.h);
+            m_rifePrevious = std::move(current);
+            m_rifePreviousSeq = r.seq;
+        }
+        m_ctx->Unmap(r.staging.get(), 0);
+        RecycleStaging(std::move(r.staging));
+        m_rifeReadbacks.pop_front();
+    }
+}
+
+std::vector<float> FrameGen::RifeConvert(const D3D11_MAPPED_SUBRESOURCE& mapped) const
+{
     // RIFE는 BGR 순서로 학습됐다. 평면 3채널로 나눈다.
     const size_t pixels = (size_t)m_rifeW * m_rifeH;
     std::vector<float> out(pixels * 3);
@@ -826,8 +973,6 @@ std::vector<float> FrameGen::RifePrepare(const Frame& f)
             out[pixels * 2 + base + x] = row[x * 4] / 255.0f;
         }
     }
-    m_ctx->Unmap(staging.get(), 0);
-    RecycleStaging(staging);
     return out;
 }
 
@@ -891,6 +1036,10 @@ ID3D11ShaderResourceView* FrameGen::Render(double now, const FgOptions& options)
 
 ID3D11ShaderResourceView* FrameGen::RenderRegion(double now, const FgOptions& options)
 {
+    if (m_realtime) {
+        ResolveIncoming(false);
+        RifePoll(false);
+    }
     PollReadbacks();
     TimerPoll(m_timerEstimate);
     m_stats.estimateMs = m_timerEstimate.ms;
@@ -899,6 +1048,13 @@ ID3D11ShaderResourceView* FrameGen::RenderRegion(double now, const FgOptions& op
     if (m_rife && wantRife) {
         RifeEngine::Result result;
         if (m_rife->TakeResult(result)) {
+            if (m_realtime) {
+                for (const auto& [seq, captured] : m_rifeTimes)
+                    if (seq == result.seq) {
+                        m_stats.rifeLagLastMs = (now - captured) * 1000.0;
+                        m_rifeLagMedianMs = PushLag(m_rifeLags, now - captured, m_stats.rifeLagMs);
+                    }
+            }
             // 보관 중인 프레임 쌍의 결과만 쓴다. 더 늦은 결과는 이미 지나갔다.
             if (result.seq >= m_stats.realFrames - 1) RifeUpload(result);
             m_rife->Recycle(std::move(result.planes));
@@ -934,8 +1090,15 @@ ID3D11ShaderResourceView* FrameGen::RenderRegion(double now, const FgOptions& op
     double delay = extrapolate ? 0.0 : m_interval + kDisplayMargin;
     // RIFE 결과를 기다릴 시간만큼 화면을 더 늦춘다. 지연이 그만큼 늘어난다.
     // 결과가 프레임 간격 안에 나올 때만 늦춘다. 그보다 느리면 어차피 블록 매칭으로 보여 주므로 지연만 늘어난다.
-    const bool rifeReady = wantRife && m_stats.rifeState == RifeEngine::STATE_READY && m_stats.rifeMs > 0 && m_stats.rifeMs < m_interval * 1000.0;
-    if (rifeReady) delay += m_stats.rifeMs / 1000.0;
+    // 실시간에서는 캡처부터 결과가 나올 때까지 잰 시간을 쓴다 (GPU에서 입력을 읽어 오는 시간도 들어 있다).
+    // 쓸지는 중앙값으로 정하고(가끔 튀는 값으로 켜졌다 꺼졌다 하면 표시 시계가 건너뛴다), 기다리는 시간은 프레임 간격의
+    // 90%를 넘기지 않는다 (앞 쌍까지만 보관하므로). 그보다 늦은 결과는 그 쌍만 블록 매칭으로 대신한다.
+    const double rifeTypical = m_realtime ? m_rifeLagMedianMs : m_stats.rifeMs;
+    const double rifeWait = m_realtime ? std::min(m_stats.rifeLagMs, m_interval * 900.0) : m_stats.rifeMs;
+    const bool rifeReady = wantRife && m_stats.rifeState == RifeEngine::STATE_READY && rifeTypical > 0 && rifeTypical < m_interval * 1000.0;
+    if (rifeReady) delay += rifeWait / 1000.0;
+    // 블록 매칭도 GPU가 바빠 프레임을 늦게 받아들이면 그만큼 늦춘다 (RIFE를 기다릴 때는 그 안에 들어 있다).
+    else if (!extrapolate && m_realtime) delay += std::min(m_stats.acceptLagMs / 1000.0, m_interval);
     const double target = now - delay;
     m_clock += now - m_lastRender;
     m_lastRender = now;
