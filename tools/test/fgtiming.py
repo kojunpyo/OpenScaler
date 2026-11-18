@@ -1,7 +1,8 @@
 # --fg-log 기록을 분석해 실시간 프레임 생성을 README의 "성능 평가 기준"으로 매긴다.
 # 사용법: python -I tools/test/fgtiming.py fg.csv
 #
-# 기록의 열: 시각, 표시 시점, 게임 프레임 수, 걸러 낸 중복 수, RIFE 합성 수, RIFE 대신 블록 매칭 수, 신경망 ms, 화면 속 게임 시각, RIFE 입력 높이
+# 기록의 열: 시각, 표시 시점, 게임 프레임 수, 걸러 낸 중복 수, RIFE 합성 수, RIFE 대신 블록 매칭 수, 신경망 ms, 화면 속 게임 시각, RIFE 입력 높이,
+#           (1.3.1부터) 움직임 찾기 GPU ms, 합성 GPU ms, 작업 너비, 작업 높이 (프레임 생성 영역을 지정하면 영역 크기)
 # 주사율은 출력 간격의 중앙값으로 정한다 (수직 동기화로 화면마다 한 번 그리므로). 그래서 60Hz와 144Hz 모니터에 같은 기준을 쓴다.
 import statistics
 import sys
@@ -15,14 +16,18 @@ def grade(value, good, fair, higher_is_better=True):
 
 rows = []
 heights = []
+gpu = []  # (움직임 찾기 ms, 합성 ms, 작업 너비, 작업 높이)
 for line in open(sys.argv[1]):
     a = line.strip().split(',')
     if len(a) >= 8 and a[0] != 'slowmo':
         rows.append((float(a[0]), float(a[1]), int(a[2]), int(a[3]), int(a[4]), int(a[5]), float(a[6]), float(a[7])))
         if len(a) >= 9:
             heights.append(a[8])
+        if len(a) >= 13:
+            gpu.append((float(a[9]), float(a[10]), int(a[11]), int(a[12])))
 rows = rows[len(rows) // 5:]  # 시작 직후(RIFE 준비, 표시 시계 안정)는 뺀다
 heights = heights[len(heights) // 5:]
+gpu = gpu[len(gpu) // 5:]
 
 times = [r[0] for r in rows]
 gaps = [(b - a) * 1000 for a, b in zip(times, times[1:])]
@@ -68,5 +73,10 @@ if shown + missed > 0:
     show("RIFE를 제때 쓴 비율", f"{100 * rate:.0f}% ({rows[-1][6]:.1f}ms)", grade(rate, 0.95, 0.80), "95% / 80% 이상")
     if heights:
         print(f"RIFE 입력 높이: 처음 {heights[0]}, 마지막 {heights[-1]}")
+if gpu:
+    est = statistics.median(g[0] for g in gpu)
+    syn = statistics.median(g[1] for g in gpu)
+    w, h = gpu[-1][2], gpu[-1][3]
+    print(f"GPU 시간 (중앙값): 움직임 찾기 {est:.2f}ms (게임 프레임마다), 합성 {syn:.2f}ms (화면마다), 작업 크기 {w}x{h}")
 if game_fps > refresh / 1.15:
     print("참고: 게임 fps가 주사율에 가까워 프레임을 넣을 자리가 없습니다. 화면 속 시간과 지연 항목은 의미가 없습니다.")

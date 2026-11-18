@@ -47,6 +47,7 @@ struct FgStats {
     bool noRoom = false;    // 진짜 프레임이 주사율만큼 나와 넣을 자리가 없다
     long long duplicates = 0;  // 내용이 같아 버린 캡처 프레임 수
     long long realFrames = 0;  // 받아들인 진짜 프레임 수
+    int workW = 0, workH = 0;  // 움직임 추정과 합성 크기 (영역을 지정했으면 영역 크기)
 
     // RIFE
     int rifeState = -1;        // -1: 쓰지 않음, 나머지는 RifeEngine::State

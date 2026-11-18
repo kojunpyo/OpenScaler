@@ -191,6 +191,8 @@ void FrameGen::EnsureFrames(UINT fullW, UINT fullH, UINT rx, UINT ry, UINT rw, U
     m_region = region;
     m_regionX = rx;
     m_regionY = ry;
+    m_stats.workW = (int)w;
+    m_stats.workH = (int)h;
     m_flowSets.clear();
     m_flowSets.reserve(8);  // 포인터가 바뀌지 않게 미리 잡아 둔다 (칸 크기는 3가지뿐)
 

@@ -1394,6 +1394,9 @@ static void SlowMoUpdateBeforeCapture(ScalingSession* s)
     g_slowMo.state = SLOWMO_RECORDING;
 }
 
+// --fg-region: 테스트용으로 프로필의 영역 대신 쓴다 (저장하지 않는다). 너비가 0이면 화면 전체, 음수면 쓰지 않음
+static float g_fgRegionOverride[4] = { 0, 0, -1, 0 };
+
 static FgOptions CurrentFgOptions(const ScalingSession* s)
 {
     FgOptions o;
@@ -1405,12 +1408,18 @@ static FgOptions CurrentFgOptions(const ScalingSession* s)
     o.learn = g_settings.fgLearn;
     o.useMap = g_settings.fgPreset != FG_PRESET_NO_MAP;
     o.refreshHz = s->refreshHz;
-    if (s->profile.HasRegion()) {
-        const GameProfile& p = s->profile;
-        o.regionX = (int)std::lround(p.regionX * s->srcW);
-        o.regionY = (int)std::lround(p.regionY * s->srcH);
-        o.regionW = (int)std::lround((p.regionX + p.regionW) * s->srcW) - o.regionX;
-        o.regionH = (int)std::lround((p.regionY + p.regionH) * s->srcH) - o.regionY;
+    float rx = s->profile.regionX, ry = s->profile.regionY, rw = s->profile.regionW, rh = s->profile.regionH;
+    if (g_fgRegionOverride[2] >= 0) {
+        rx = g_fgRegionOverride[0];
+        ry = g_fgRegionOverride[1];
+        rw = g_fgRegionOverride[2];
+        rh = g_fgRegionOverride[3];
+    }
+    if (rw > 0 && rh > 0) {
+        o.regionX = (int)std::lround(rx * s->srcW);
+        o.regionY = (int)std::lround(ry * s->srcH);
+        o.regionW = (int)std::lround((rx + rw) * s->srcW) - o.regionX;
+        o.regionH = (int)std::lround((ry + rh) * s->srcH) - o.regionY;
     }
     return o;
 }
@@ -1564,9 +1573,11 @@ static void RenderFrame()
                 displaySrv = generated;
                 if (auto held = g_frameGen->HeldFrame()) compareSrv = held;
             }
-            if (g_fgLog) fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f,%d\n", now, g_frameGen->Stats().displayT, g_frameGen->Stats().realFrames,
-                                 g_frameGen->Stats().duplicates, g_frameGen->Stats().rifeShown, g_frameGen->Stats().rifeMissed, g_frameGen->Stats().rifeMs,
-                                 g_frameGen->Stats().contentTime, g_frameGen->Stats().rifeHeight);
+            if (g_fgLog) {
+                const FgStats& st = g_frameGen->Stats();
+                fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f,%d,%.3f,%.3f,%d,%d\n", now, st.displayT, st.realFrames, st.duplicates,
+                        st.rifeShown, st.rifeMissed, st.rifeMs, st.contentTime, st.rifeHeight, st.estimateMs, st.synthMs, st.workW, st.workH);
+            }
         } else if (s->fgWasOn && !g_settings.frameGen) {
             g_frameGen->SetProfile(nullptr);
             g_frameGen->Reset();
@@ -1986,6 +1997,18 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--fg-log" && i + 1 < argc) _wfopen_s(&g_fgLog, argv[++i], L"w");
         else if (a == L"--slowmo-auto" && i + 1 < argc) slowMoAuto = _wtof(argv[++i]);
         else if (a == L"--region-edit") regionEditAuto = true;
+        else if (a == L"--fg-region" && i + 1 < argc) {
+            // "x,y,w,h" (게임 화면에 대한 비율) 또는 "none"(화면 전체)
+            const std::wstring v = argv[++i];
+            float r[4] = { 0, 0, 0, 0 };
+            if (v == L"none" || swscanf_s(v.c_str(), L"%f,%f,%f,%f", &r[0], &r[1], &r[2], &r[3]) == 4) {
+                r[0] = std::clamp(r[0], 0.0f, 1.0f);
+                r[1] = std::clamp(r[1], 0.0f, 1.0f);
+                r[2] = std::clamp(r[2], 0.0f, 1.0f - r[0]);
+                r[3] = std::clamp(r[3], 0.0f, 1.0f - r[1]);
+                std::copy(r, r + 4, g_fgRegionOverride);
+            }
+        }
         else if (a == L"--slowmo-target" && i + 1 < argc) g_settings.slowMoTargetFps = std::clamp(_wtoi(argv[++i]), 30, 1000);
         else if (a == L"--slowmo-seconds" && i + 1 < argc) g_settings.slowMoSeconds = std::clamp(_wtoi(argv[++i]), 1, 3);
         else if (a == L"--slowmo-dump" && i + 1 < argc) g_slowMo.dumpDir = argv[++i];

@@ -350,10 +350,11 @@ DJMAX 녹화 두 개 (RIFE 녹화 / 블록 매칭 녹화의 진짜 프레임, 12
 고주사율 모니터 기기에서 2026-11-21, 22일에 확인할 예정이다. 등급 기준은 README의 "성능 평가 기준"이다.
 
 준비:
-- 릴리스 zip을 푼다. `rife` 폴더와 `tools\devicecheck.ps1`이 들어 있다. 다른 OpenScaler는 꺼 둔다 (단축키가 겹친다).
-- 게임을 창 모드로, 모니터보다 낮은 해상도로 켠다. 게임 fps가 주사율의 87%를 넘으면 넣을 자리가 없으므로, 게임의 최대 프레임을 주사율의 절반 정도로 맞춘다 (144Hz면 60~72fps).
+- 릴리스 zip(v1.3.1 이상)을 푼다. `rife` 폴더와 `tools\devicecheck.ps1`이 들어 있다. 다른 OpenScaler는 꺼 둔다 (단축키가 겹친다).
+- 게임을 창 모드로, 모니터보다 낮은 해상도로 켠다. 스크립트가 단계마다 게임의 최대 fps를 바꾸라고 묻는다.
+- 이 PC에서 학습한 DJMAX 데이터를 **공유용으로 내보내기**로 파일을 만들어 가져간다 (공유 시험용).
 
-기록 모으기 (약 5분, 파이썬 필요 없음):
+기록 모으기 (약 10분, 파이썬 필요 없음):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\devicecheck.ps1 -Target "창 제목 일부" -Seconds 30
@@ -361,21 +362,36 @@ powershell -ExecutionPolicy Bypass -File tools\devicecheck.ps1 -Target "창 제�
 
 1. 기기 정보 (GPU, 주사율, 해상도)
 2. `--rife-bench`: 입력 크기별 신경망 시간
-3. RIFE, 블록 매칭, 외삽을 30초씩 실시간 기록 (`--fg-log`). 카운트다운이 끝나면 게임 화면이 계속 움직이도록 조작한다.
-4. 화질 측정용 슬로모션 덤프 2초. 녹화 전에 게임의 fps 제한을 풀라고 묻는다 (이웃한 프레임이 촘촘해야 30fps 조건까지 잴 수 있다). 덤프에는 게임 프레임의 캡처 시각(`real_times.txt`)도 남는다.
+3. 게임 fps를 주사율의 절반으로 맞추고 RIFE, 블록 매칭, 외삽을 30초씩 실시간 기록 (`--fg-log`, 프로필에 영역이 있어도 `--fg-region none`으로 화면 전체). 카운트다운이 끝나면 게임 화면이 계속 움직이도록 조작한다.
+4. 블록 매칭 + 프레임 생성 영역(`-Region`, 기본은 가운데 세로 절반 `0.25,0,0.5,1`) 30초. 화면 전체 기록과 GPU 시간을 비교한다. 리듬게임이면 `-Region`을 건반 자리에 맞추면 더 정확하다.
+5. 게임 fps를 주사율의 0.4배(144Hz면 57fps 정도)로 바꾸고 블록 매칭 30초. 게임 프레임 사이에 넣는 장수가 2장, 3장으로 번갈아 바뀌는 "정수배가 아닌 배수"에서 화면 속 시간이 고른지 본다.
+6. 화질 측정용 슬로모션 덤프 2초. 녹화 전에 게임의 fps 제한을 풀라고 묻는다 (이웃한 프레임이 촘촘해야 30fps 조건까지 잴 수 있다). 덤프에는 게임 프레임의 캡처 시각(`real_times.txt`)도 남는다.
+7. 그 기기의 `profiles` 폴더를 결과 폴더에 복사한다.
+
+실시간 기록(1.3.1부터)에는 움직임 찾기와 합성의 GPU 시간, 작업 크기(영역을 지정하면 영역 크기)가 함께 남는다. `fgtiming.py`가 중앙값을 보여 준다.
 
 가져와서 분석:
 
 ```powershell
-python -I tools/test/fgtiming.py 결과폴더/fg_rife.csv   # block, ext도
+python -I tools/test/fgtiming.py 결과폴더/fg_block.csv   # rife, ext, region, block_nonint도
 OpenScaler.exe --fg-gaptest 결과폴더/dump 결과폴더/gap
 python -I tools/test/fgquality.py 결과폴더/gap/fg_gaptest.csv
+python -I tools/profile_info.py 결과폴더/profiles/게임.json
 ```
+
+- 영역: `fg_block.csv`와 `fg_region.csv`의 GPU 시간과 작업 크기를 비교한다. 작업 넓이가 절반이면 움직임 찾기와 합성 시간도 절반 가까이 줄어야 한다.
+- 정수배가 아닌 배수: `fg_block_nonint.csv`의 "화면 속 시간 고르기"와 "멈춤"이 `fg_block.csv`보다 크게 나쁘면 개선 후보 "정수배가 아닌 배수"를 먼저 한다.
+
+공유 시험 (사용자):
+- 가져간 DJMAX 파일을 그 기기에서 **공유 데이터 가져오기**로 넣고, 게임별 학습 구역에 이 PC의 채점 기록과 학습값이 보이는지 본다.
+- 그 기기의 게임 창 크기가 이 PC와 다르면, 몇 판 한 뒤 "기준보다 +dB"가 이 PC 때와 비슷한지 본다 (칸 크기가 원본 픽셀 단위라 다시 맞춰지는지).
+- 그 기기에서 채점이 200회 넘게 쌓이면 내보내서 가져온다. `shared-profiles`의 첫 공유 후보가 된다.
 
 직접 볼 것 (사용자만 확인 가능):
 - 상태 표시(Alt+Shift+O)에서 출력 fps가 게임 fps보다 높은지
 - 화면이 부드러워졌는지, 입력이 늦게 느껴지는지, 판정 타이밍이 어긋나는지
 - 비교 모드(Alt+Shift+C)로 왼쪽(생성 없음)과 오른쪽(블록 매칭 보간, RIFE 보간)을 나란히 본 느낌
+- 프레임 생성 영역을 건반 자리에 지정했을 때 경계에서 어색한 곳이 없는지
 - 60Hz에서 RIFE가 출력 끊김을 많이 냈다 (마인크래프트 분당 74번). 더 좋은 GPU에서도 그런지 본다.
 - README 시연 GIF 다시 찍기: `tools/test/demoform.ps1` 창이나 실제 게임을 비교 모드로 확대하고 슬로모션을 한 장씩 넘기며 찍는다 (이 PC에서 쓴 방법). 영상 녹화가 된다면 실제 속도 영상도 남긴다.
 
