@@ -239,6 +239,19 @@ static std::unique_ptr<FrameGen> g_frameGen;
 static std::future<std::unique_ptr<FrameGen>> g_frameGenLoading;
 static FILE* g_fgLog = nullptr;  // --fg-log: 화면마다 시점을 기록한다 (테스트용)
 
+// --fg-log: 화면마다 GPU 작업 전체(프레임 생성, 업스케일, 상태 표시)가 GPU에서 시작해 끝날 때까지 걸린 시간.
+// 게임이 GPU를 함께 쓰면 기다린 시간도 들어간다. 결과는 몇 화면 뒤에 나오므로 화면 번호와 함께 남긴다.
+struct FrameGpuTimer {
+    winrt::com_ptr<ID3D11Query> disjoint, begin, mid, end;  // mid: 프레임 생성이 끝난 때
+    long long frame = -1;
+    bool pending = false;
+};
+static FrameGpuTimer g_frameTimers[8];
+static long long g_frameIndex = 0, g_timedFrame = -1;
+static double g_timedMs = 0, g_timedFgMs = 0;
+static FrameGpuTimer* g_activeTimer = nullptr;
+static bool g_timerMidEnded = false;
+
 // 슬로모션 테스트: 짧게 녹화해 목표 fps만큼 채운 뒤, 화면 주사율로 한 장씩 보여 준다.
 static struct {
     SlowMoState state = SLOWMO_OFF;
@@ -1463,6 +1476,41 @@ static void RenderFrame()
         g_frameGenLoading.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         g_frameGen = g_frameGenLoading.get();
     SlowMoUpdateBeforeCapture(s);
+    if (g_fgLog) {
+        g_frameIndex++;
+        for (auto& t : g_frameTimers) {
+            if (!t.pending) continue;
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {};
+            UINT64 t0 = 0, tm = 0, t1 = 0;
+            if (g_ctx->GetData(t.disjoint.get(), &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+                g_ctx->GetData(t.begin.get(), &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+                g_ctx->GetData(t.mid.get(), &tm, sizeof(tm), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+                g_ctx->GetData(t.end.get(), &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK)
+                continue;
+            t.pending = false;
+            if (!dj.Disjoint && dj.Frequency && t.frame > g_timedFrame) {
+                g_timedFrame = t.frame;
+                g_timedMs = (double)(t1 - t0) * 1000.0 / dj.Frequency;
+                g_timedFgMs = (double)(tm - t0) * 1000.0 / dj.Frequency;
+            }
+        }
+        FrameGpuTimer& t = g_frameTimers[g_frameIndex % 8];
+        if (!t.disjoint) {
+            D3D11_QUERY_DESC dd = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 }, sd = { D3D11_QUERY_TIMESTAMP, 0 };
+            check_hresult(g_device->CreateQuery(&dd, t.disjoint.put()));
+            check_hresult(g_device->CreateQuery(&sd, t.begin.put()));
+            check_hresult(g_device->CreateQuery(&sd, t.mid.put()));
+            check_hresult(g_device->CreateQuery(&sd, t.end.put()));
+        }
+        g_activeTimer = nullptr;
+        if (!t.pending) {
+            g_ctx->Begin(t.disjoint.get());
+            g_ctx->End(t.begin.get());
+            t.frame = g_frameIndex;
+            g_activeTimer = &t;
+            g_timerMidEnded = false;
+        }
+    }
     if (g_slowMo.state == SLOWMO_RECORDING) g_ctx->ClearState();  // 녹화는 계산 셰이더를 쓰므로 Direct2D가 남긴 상태를 먼저 지운다
 
     // 1. 가장 최신 캡처 프레임만 사용한다. 녹화 중에는 사이에 온 프레임도 버리지 않는다.
@@ -1577,12 +1625,16 @@ static void RenderFrame()
                 if (auto held = g_frameGen->HeldFrame()) compareSrv = held;
             }
             const double renderMs = (NowSeconds() - now) * 1000.0;
+            if (g_activeTimer && !g_timerMidEnded) {
+                g_ctx->End(g_activeTimer->mid.get());
+                g_timerMidEnded = true;
+            }
             if (g_fgLog) {
                 const FgStats& st = g_frameGen->Stats();
-                fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f,%d,%.3f,%.3f,%d,%d,%.3f,%.3f,%.2f,%.2f,%.2f,%.2f\n", now, st.displayT, st.realFrames,
+                fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f,%d,%.3f,%.3f,%d,%d,%.3f,%.3f,%.2f,%.2f,%.2f,%.2f,%lld,%lld,%.3f,%.3f\n", now, st.displayT, st.realFrames,
                         st.duplicates, st.rifeShown, st.rifeMissed, st.rifeMs, st.contentTime, st.rifeHeight, st.estimateMs, st.synthMs, st.workW,
                         st.workH, pushMs, renderMs, st.acceptLagMs, st.rifeLagMs, st.rifeLagLastMs,
-                        newFrame ? (pushStart - frameTime) * 1000.0 : -1.0);
+                        newFrame ? (pushStart - frameTime) * 1000.0 : -1.0, g_frameIndex, g_timedFrame, g_timedMs, g_timedFgMs);
             }
         } else if (s->fgWasOn && !g_settings.frameGen) {
             g_frameGen->SetProfile(nullptr);
@@ -1650,6 +1702,13 @@ static void RenderFrame()
         }
     }
 
+    if (g_activeTimer) {
+        if (!g_timerMidEnded) g_ctx->End(g_activeTimer->mid.get());
+        g_ctx->End(g_activeTimer->end.get());
+        g_ctx->End(g_activeTimer->disjoint.get());
+        g_activeTimer->pending = true;
+        g_activeTimer = nullptr;
+    }
     // 3. 수직동기에 맞춰 출력
     s->swapChain->Present(1, 0);
     s->presentedFrames++;
@@ -2005,6 +2064,7 @@ int wmain(int argc, wchar_t** argv)
             if (i + 1 < argc && std::wstring(argv[i + 1]).ends_with(L".json")) fgGapTestProfile = argv[++i];
         }
         else if (a == L"--fg") g_settings.frameGen = true;
+        else if (a == L"--no-fg") g_settings.frameGen = false;  // 프레임 생성을 끈 기준 측정용
         else if (a == L"--fg-mult" && i + 1 < argc) g_settings.fgMultiplier = _wtoi(argv[++i]);
         else if (a == L"--fg-quality" && i + 1 < argc) g_settings.fgQuality = std::clamp(_wtoi(argv[++i]), 0, FG_QUALITY_COUNT - 1);
         else if (a == L"--fg-extrapolate") SetFgMode(g_settings, FG_MODE_EXTRAPOLATE);

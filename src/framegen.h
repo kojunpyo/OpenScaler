@@ -146,7 +146,8 @@ public:
 
 private:
     static constexpr int kLevels = 5;  // 원본, 1/2, 1/4, 1/8, 1/16
-    static constexpr int kFrames = 4;  // 최근 3장 + 다음 프레임을 받을 빈 슬롯
+    // 최근 3장 + 채점이 끝날 때까지 남겨 둘 4장 + 다음 프레임을 받을 빈 슬롯
+    static constexpr int kFrames = 8;
     static constexpr int kDuplicateLevel = 3;  // 중복 프레임 검사에 쓰는 단계 (1/8)
 
     struct Frame {
@@ -212,7 +213,7 @@ private:
     void EnsureFrames(UINT w, UINT h, UINT rx = 0, UINT ry = 0, UINT rw = 0, UINT rh = 0);
     ID3D11ShaderResourceView* RenderRegion(double now, const FgOptions& options);  // 영역 크기의 결과
     ID3D11ShaderResourceView* FullOf(ID3D11ShaderResourceView* srv) const;  // 영역 영상이면 그 프레임의 전체 화면
-    FlowSet& GetFlowSet(int cellPx);
+    FlowSet& GetFlowSet(int cellPx, bool eval = false);  // eval: 채점 전용 격자 (실시간 움직임을 덮어쓰지 않게)
     Target MakeTarget(UINT w, UINT h, DXGI_FORMAT format, bool uav);
     void Run(ID3D11ComputeShader* cs, std::initializer_list<ID3D11ShaderResourceView*> srvs, ID3D11UnorderedAccessView* uav,
              const Cb& cb, UINT groupsX, UINT groupsY);
@@ -230,7 +231,19 @@ private:
     bool ReadDuplicate(ID3D11Texture2D* staging, bool block, bool& same);     // GPU가 아직 끝내지 않았으면 false
     bool IsDuplicate(const Frame& a, const Frame& b);                          // 기다려서 바로 판단한다 (슬로모션 녹화)
 
+    // 채점: 실시간에서는 나눠서 새 게임 프레임이 오지 않은 화면에 한 단계씩 돌린다 (한 화면에 몰리면 144Hz에서 끊긴다).
+    struct EvalJob {
+        bool active = false;
+        int step = 0;
+        int shift = 0;  // 시작한 뒤 받아들인 게임 프레임 수 (채점할 프레임의 위치가 그만큼 밀린다)
+        bool extrapolate = false;
+        bool mapReady = false;
+        FgParams params[2];
+        double gap = 0;  // 보간: f0과 f2의 간격, 외삽: f0과 f1의 간격
+        float t = 0;     // 외삽 시점
+    };
     void RunEvaluation(const FgOptions& options);
+    void RunEvaluationStep();
     FgParams LearnedParams(const FgOptions& options) const;  // 이 게임에서 지금 방식(보간/외삽)으로 학습한 값
     void QueueFlowSample(const FlowSet& set, double interval);
     void PollReadbacks();
@@ -291,7 +304,7 @@ private:
     bool m_pairValid = false;
     bool m_tripleValid = false;
 
-    std::vector<FlowSet> m_flowSets;
+    std::vector<FlowSet> m_flowSets, m_evalFlowSets;
     FlowSet* m_liveFlow = nullptr;
     FlowSet* m_olderFlow = nullptr;  // 한 쌍 앞 프레임 쌍의 움직임이 들어 있는 격자 (없으면 nullptr)
     Target m_output;
@@ -317,6 +330,8 @@ private:
     int m_evalFilled = 0;
     int m_evalCurrentGroup = -1;
     bool m_evalExtrapolate = false;  // 이번 채점이 외삽 학습용인지
+    EvalJob m_evalJob;
+    bool m_acceptedThisRender = false;  // 이번 화면에서 게임 프레임을 받아들였는지
 
     std::unique_ptr<RifeEngine> m_rife;
     UINT m_rifeW = 0, m_rifeH = 0;

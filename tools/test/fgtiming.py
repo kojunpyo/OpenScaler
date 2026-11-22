@@ -5,6 +5,7 @@
 #           (1.3.1부터) 움직임 찾기 GPU ms, 합성 GPU ms, 작업 너비, 작업 높이 (프레임 생성 영역을 지정하면 영역 크기)
 #           (1.3.3부터) 게임 프레임을 넘기는 데 CPU가 머문 ms, 표시 프레임을 만드는 데 머문 ms, 받아들이기 지연 ms, RIFE 결과 지연 ms(표시에 쓴 값),
 #           마지막 RIFE 결과의 지연 ms, 캡처부터 넘길 때까지 ms (새 프레임이 없으면 -1)
+#           (1.3.4부터) 화면 번호, GPU 시간이 나온 화면 번호, 그 화면의 GPU 시간 ms(프레임 생성부터 상태 표시까지), 그중 프레임 생성까지 ms
 # 주사율은 출력 간격의 중앙값으로 정한다 (수직 동기화로 화면마다 한 번 그리므로). 그래서 60Hz와 144Hz 모니터에 같은 기준을 쓴다.
 import statistics
 import sys
@@ -91,5 +92,15 @@ if cpu:
     lags = sorted({c[2] for c in cpu if c[2] > 0})
     if lags:
         print(f"RIFE 결과 지연 (캡처부터): 중앙값 {lags[len(lags) // 2]:.1f}ms, 최대 {lags[-1]:.1f}ms")
+if lines_gpu := [l for l in open(sys.argv[1]) if l.count(',') >= 22 and not l.startswith('slowmo')]:
+    # 화면마다 GPU 작업 전체 시간: 한 칸에 가까우면 그래픽카드가 모자라 끊긴다 (144Hz면 한 칸 6.9ms)
+    frame_gpu = {}
+    for l in lines_gpu[len(lines_gpu) // 5:]:
+        a = l.strip().split(',')
+        if int(a[20]) >= 0:
+            frame_gpu[int(a[20])] = float(a[21])
+    if frame_gpu:
+        v = sorted(frame_gpu.values())
+        print(f"화면마다 GPU 시간: 중앙값 {v[len(v) // 2]:.2f}ms, 90% {v[int(len(v) * 0.9)]:.2f}ms (한 칸 {frame_ms:.2f}ms)")
 if game_fps > refresh / 1.15:
     print("참고: 게임 fps가 주사율에 가까워 프레임을 넣을 자리가 없습니다. 화면 속 시간과 지연 항목은 의미가 없습니다.")

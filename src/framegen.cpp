@@ -182,6 +182,8 @@ void FrameGen::Reset()
     m_stats.acceptLagMs = m_stats.rifeLagMs = 0;
     m_rifeLagMedianMs = 0;
     m_incoming = Incoming();
+    m_evalJob.active = false;
+    m_acceptedThisRender = false;
     for (auto& result : m_rifeResults) result.seq = -1;
     for (auto& set : m_flowSets) set.hasHistory = false;
 }
@@ -224,6 +226,8 @@ void FrameGen::EnsureFrames(UINT fullW, UINT fullH, UINT rx, UINT ry, UINT rw, U
     m_stats.workH = (int)h;
     m_flowSets.clear();
     m_flowSets.reserve(8);  // 포인터가 바뀌지 않게 미리 잡아 둔다 (칸 크기는 3가지뿐)
+    m_evalFlowSets.clear();
+    m_evalFlowSets.reserve(8);
 
     for (int i = 0; i < kLevels; i++) {
         m_lvlW[i] = std::max(1u, w >> i);
@@ -255,9 +259,10 @@ void FrameGen::EnsureFrames(UINT fullW, UINT fullH, UINT rx, UINT ry, UINT rw, U
     m_stagingPool.clear();
 }
 
-FrameGen::FlowSet& FrameGen::GetFlowSet(int cellPx)
+FrameGen::FlowSet& FrameGen::GetFlowSet(int cellPx, bool eval)
 {
-    for (auto& set : m_flowSets)
+    std::vector<FlowSet>& sets = eval ? m_evalFlowSets : m_flowSets;
+    for (auto& set : sets)
         if (set.cellPx == cellPx) return set;
 
     FlowSet set;
@@ -276,8 +281,8 @@ FrameGen::FlowSet& FrameGen::GetFlowSet(int cellPx)
     }
     set.splat = MakeTarget(set.gridW, set.gridH, DXGI_FORMAT_R32_UINT, true);
     set.motion = MakeTarget(set.gridW, set.gridH, flowFormat, true);
-    m_flowSets.push_back(std::move(set));
-    return m_flowSets.back();
+    sets.push_back(std::move(set));
+    return sets.back();
 }
 
 FrameGen::Cb FrameGen::BaseCb(const FlowSet* set) const
@@ -540,41 +545,64 @@ void FrameGen::RunEvaluation(const FgOptions& options)
     const bool extrapolate = options.method == FG_METHOD_EXTRAPOLATE;
     const FgLearner& learner = m_profile->Learner(extrapolate);
 
-    m_evalCurrentGroup = ++m_evalGroup;
-    m_evalFilled = 0;
-    m_evalExtrapolate = extrapolate;
-
-    const FgParams evalParams[2] = { Effective(learner.params, options), Effective(learner.Candidate(), options) };
+    EvalJob job;
+    job.extrapolate = extrapolate;
+    job.mapReady = mapReady;
+    job.params[0] = Effective(learner.params, options);
+    job.params[1] = Effective(learner.Candidate(), options);
     if (extrapolate) {
         // 외삽: 실시간과 같이 앞의 두 장(f0, f1)만 보고 다음 게임 프레임(f2)의 시각까지 예측한 뒤 진짜 f2와 비교한다.
         // 기준은 프레임 생성이 없을 때와 같은 "f1 그대로"다.
-        const double pairGap = f1.time - f0.time;
-        if (pairGap <= 0 || f2.time <= f1.time) {
+        job.gap = f1.time - f0.time;
+        if (job.gap <= 0 || f2.time <= f1.time) {
             m_evalCurrentGroup = -1;
             return;
         }
-        const float t = (float)std::min(1.0 + (f2.time - f1.time) / pairGap, ExtrapolateLimit(pairGap, m_interval));
-        for (int i = 0; i < 2; i++) {
-            FlowSet& set = GetFlowSet(evalParams[i].cellPx);
-            Estimate(f0, f1, evalParams[i], set, false, mapReady && evalParams[i].useMap, pairGap);
-            Synthesize(f0, f1, set, t, evalParams[i], m_evalOutput.uav.get());
-            QueueMse(m_evalOutput.srv.get(), f2.colorSrv.get(), m_evalCurrentGroup, i);
-        }
-        QueueMse(f1.colorSrv.get(), f2.colorSrv.get(), m_evalCurrentGroup, 2);
-        return;
+        job.t = (float)std::min(1.0 + (f2.time - f1.time) / job.gap, ExtrapolateLimit(job.gap, m_interval));
+    } else {
+        // 보간: 가운데 프레임을 가리고 양옆 프레임으로 만들어 본다. 간격이 2배이므로 절대 점수보다 비교에 쓴다.
+        job.gap = f2.time - f0.time;
     }
+    m_evalCurrentGroup = ++m_evalGroup;
+    m_evalFilled = 0;
+    m_evalExtrapolate = extrapolate;
+    job.active = true;
+    m_evalJob = job;
+    // 테스트는 한 번에 끝낸다 (결과가 실행마다 같도록). 실시간은 다음 화면부터 나눠 돌린다.
+    if (!m_realtime)
+        while (m_evalJob.active) RunEvaluationStep();
+}
 
-    // 보간: 가운데 프레임을 가리고 양옆 프레임으로 만들어 본다. 간격이 2배이므로 절대 점수보다 비교에 쓴다.
-    const double gap = f2.time - f0.time;
-    for (int i = 0; i < 2; i++) {
-        FlowSet& set = GetFlowSet(evalParams[i].cellPx);
-        // 실시간 움직임과 같은 격자를 쓰면 다음 프레임의 합성이 어긋나므로, 채점 뒤 다시 계산한다.
-        Estimate(f0, f2, evalParams[i], set, false, mapReady && evalParams[i].useMap, gap);
-        Synthesize(f0, f2, set, 0.5f, evalParams[i], m_evalOutput.uav.get());
+void FrameGen::RunEvaluationStep()
+{
+    EvalJob& job = m_evalJob;
+    const Frame& f2 = m_frames[job.shift];
+    const Frame& f1 = m_frames[job.shift + 1];
+    const Frame& f0 = m_frames[job.shift + 2];
+    // 단계 0, 1: 지금 학습값으로 움직임 찾기, 합성과 비교. 단계 2, 3: 후보 값으로 같은 일과 기준 비교.
+    // 한 단계가 움직임 찾기나 합성 하나뿐이라 한 화면에 더하는 시간이 짧다 (1280x720에서 2ms 안쪽).
+    // 채점 전용 격자를 써서 실시간 움직임을 덮어쓰지 않는다.
+    const int i = job.step / 2;
+    const bool estimate = job.step % 2 == 0;
+    const FgParams& params = job.params[i];
+    FlowSet& set = GetFlowSet(params.cellPx, true);
+    const Frame& a = f0;
+    const Frame& b = job.extrapolate ? f1 : f2;
+    if (estimate) {
+        Estimate(a, b, params, set, false, job.mapReady && params.useMap, job.gap);
+    } else if (job.extrapolate) {
+        Synthesize(a, b, set, job.t, params, m_evalOutput.uav.get());
+        QueueMse(m_evalOutput.srv.get(), f2.colorSrv.get(), m_evalCurrentGroup, i);
+        if (i == 1) QueueMse(f1.colorSrv.get(), f2.colorSrv.get(), m_evalCurrentGroup, 2);
+    } else {
+        Synthesize(a, b, set, 0.5f, params, m_evalOutput.uav.get());
         QueueMse(m_evalOutput.srv.get(), f1.colorSrv.get(), m_evalCurrentGroup, i);
+        if (i == 1) {
+            Blend(f0, f2, 0.5f, m_evalOutput.uav.get());
+            QueueMse(m_evalOutput.srv.get(), f1.colorSrv.get(), m_evalCurrentGroup, 2);
+        }
     }
-    Blend(f0, f2, 0.5f, m_evalOutput.uav.get());
-    QueueMse(m_evalOutput.srv.get(), f1.colorSrv.get(), m_evalCurrentGroup, 2);
+    if (++job.step >= 4) job.active = false;
 }
 
 void FrameGen::QueueFlowSample(const FlowSet& set, double interval)
@@ -787,6 +815,11 @@ void FrameGen::AcceptIncoming(double time, const FgOptions& options)
     f.time = time;
     m_stats.realFrames++;
     m_count = std::min(m_count + 1, kFrames - 1);
+    m_acceptedThisRender = true;
+    // 진행 중인 채점의 프레임은 한 칸씩 밀린다. 가장 오래된 f0이 남은 마지막 칸에 오면 더 기다리지 않고 지금 끝낸다
+    // (게임 fps가 주사율에 가까워 새 프레임이 없는 화면이 드물 때). 다음 프레임을 받으면 f0이 빈 슬롯으로 밀려 덮어써진다.
+    if (m_evalJob.active && ++m_evalJob.shift + 2 >= kFrames - 2)
+        while (m_evalJob.active) RunEvaluationStep();
 
     const double gap = m_count >= 2 ? time - m_frames[1].time : 0;
     m_tripleValid = m_pairValid && gap > 0 && gap < kPauseGap;
@@ -817,12 +850,11 @@ void FrameGen::AcceptIncoming(double time, const FgOptions& options)
         FlowSet& set = GetFlowSet(params.cellPx);
         const bool useMap = options.useMap && params.useMap && m_profile && m_profile->mapSamples >= 20;
 
-        if (options.learn && m_profile && m_tripleValid && time - m_lastEvalTime >= kEvalPeriod) {
+        if (options.learn && m_profile && m_tripleValid && !m_evalJob.active && time - m_lastEvalTime >= kEvalPeriod) {
             m_lastEvalTime = time;
             RunEvaluation(options);
         }
 
-        // 채점이 같은 격자를 썼을 수 있으므로 실시간 움직임은 마지막에 계산한다.
         // 긴 간격의 격자에 남은 이전 움직임은 오래전 것이므로 힌트로 쓰지 않는다.
         Estimate(m_frames[1], m_frames[0], params, set, !longGap, useMap, gap);
         m_liveFlow = &set;
@@ -1039,6 +1071,9 @@ ID3D11ShaderResourceView* FrameGen::RenderRegion(double now, const FgOptions& op
     if (m_realtime) {
         ResolveIncoming(false);
         RifePoll(false);
+        // 채점은 새 게임 프레임의 움직임 찾기와 같은 화면에 몰리지 않게, 받아들인 프레임이 없는 화면에 한 단계씩 돌린다.
+        if (m_evalJob.active && !m_acceptedThisRender) RunEvaluationStep();
+        m_acceptedThisRender = false;
     }
     PollReadbacks();
     TimerPoll(m_timerEstimate);
