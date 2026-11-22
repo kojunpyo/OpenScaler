@@ -59,7 +59,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 - 다음 작업 (자세한 내용과 측정 기록은 `docs/frame-generation-plan.md`):
   1. 고주사율 확인 결과(`docs/frame-generation-plan.md` "고주사율 확인")에서 남은 것: 화면이 큰 게임(DJMAX 1280x720)은 144Hz에서 화면 전체 프레임 생성이 분당 50~198번 끊긴다. 건반 영역을 지정하면 분당 4~19번. 1.3.5에서 영역 추천 버튼을 만들었다 (`FrameGen::RecommendRegion`, 시험 `--region-recommend 초`). 움직임 찾기를 두 화면에 나누는 방법은 효과가 없었다.
   2. 그 결과로 정할 개선 후보: RIFE 지연 줄이기(1.3.3에서 끊김은 없앴지만 추가 지연 44ms), 고정 UI와 조준점 깨짐(화면 지도의 고정 칸 보호), 정수배가 아닌 배수의 화면 간격, 장면 전환 감지, 게임별 학습과 RIFE 연결, 긴 간격에서 밝기가 바뀌는 글자 깨짐.
-  3. README 마무리: "임시" 시연 GIF 교체, 평가 표에 고주사율 결과 추가.
+  3. README 마무리: 평가 표에 고주사율 결과 추가. 시연 화면은 2026-11-22에 유튜브 게임 영상으로 바꿨다 (`docs/demo.webp`, GIF로는 22MB가 넘어 같은 크기와 장 수의 WebP로 넣음).
   4. 운영: 이슈/PR 템플릿, CONTRIBUTING.md.
 
 ## 사용 중인 단축키
