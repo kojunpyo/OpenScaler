@@ -14,7 +14,7 @@
 
 ![시연: 왼쪽은 일반 확대, 오른쪽은 OpenScaler](docs/demo.webp)
 
-> 640×360 창에서 재생한 30fps 게임 영상을 2560×1440으로 확대한 비교 모드 화면입니다. 왼쪽은 Windows가 그냥 늘린 것과 같은 일반 확대(Bilinear)이고 영상 프레임만 보여 줍니다. 오른쪽은 FSR 1.0으로 확대하고 프레임 사이에 생성한 프레임을 넣어 60fps로 만든 결과입니다 (방식: RIFE 보간).
+> 640×360 창에서 재생한 30fps 게임 영상을 2560×1440으로 확대해 같은 장면을 두 번 찍고 나란히 붙였습니다. 왼쪽은 Windows가 그냥 늘린 것과 같은 일반 확대(Bilinear)에 원래 프레임만, 오른쪽은 OpenScaler가 FSR 1.0으로 확대하고 프레임 사이에 생성한 프레임을 넣어 60fps로 만든 결과입니다 (방식: RIFE 보간).
 > 슬로모션 테스트를 한 장씩 넘기며 찍은 2초를 120장으로 담아, 실제보다 조금 느리게(약 0.83배) 재생됩니다. 영상: [Why is NieR: Automata's combat so satisfying?](https://www.youtube.com/watch?v=z6La_S9YoJ4) (Shen One)
 
 ---
