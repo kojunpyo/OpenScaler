@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(OpenScaler VERSION 1.3.7 LANGUAGES CXX RC)
+project(OpenScaler VERSION 1.3.8 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
