@@ -51,6 +51,21 @@ ImFont* g_fontThin = nullptr;   // 설명 (Galmuri11 Condensed)
 ComPtr<ID3D11ShaderResourceView> g_logo;
 int g_logoSize = 0;
 
+// 확대 화면 위 메뉴: 설정 창과 따로 ImGui 컨텍스트를 하나 더 두고, 글꼴 아틀라스는 함께 쓴다 (글꼴 포인터를 그대로 쓰려고).
+ImFontAtlas* g_atlas = nullptr;
+ImGuiContext* g_mainCtx = nullptr;
+ImGuiContext* g_overlayCtx = nullptr;
+bool g_overlayFontsDirty = false;  // 설정 창의 배율이 바뀌어 글꼴을 다시 만들었으면 메뉴 쪽 텍스처와 스타일도 다시 만든다
+bool g_inOverlay = false;          // 지금 확대 화면 위 메뉴를 그리는 중
+bool g_overlayScrollTop = true;    // 메뉴를 열면 맨 위부터 보여 준다
+Clock::time_point g_overlayLast;
+
+ImFontAtlas* SharedAtlas()
+{
+    if (!g_atlas) g_atlas = IM_NEW(ImFontAtlas)();
+    return g_atlas;
+}
+
 // 색상: 흰 바탕 + 연분홍
 ImVec4 Rgb(int hex, float a = 1.0f)
 {
@@ -154,11 +169,24 @@ const char* kRegionAdviceStill = "화면이 거의 움직이지 않았어요. �
 const char* kRegionAdviceEverywhere = "화면 대부분이 움직여서 좁힐 곳이 없어요";
 const char* kRegionRecommendHelp = "최근 10초 동안 자주 바뀐 곳을 감싸 영역 편집 창에 그려 줘요. 테두리를 다듬고 Enter로 저장하면 돼요.";
 const char* g_regionAdvice = nullptr;  // 영역 추천을 하지 못한 까닭
+const char* kOverlayHint = "Alt+Shift+G로 열고 닫아요. 메뉴가 열려 있는 동안에는 마우스로 메뉴만 누를 수 있고, 게임 키보드 입력은 그대로예요.";
+const char* kOverlayShareNote = "학습 데이터 내보내기와 가져오기는 설정 창에서 할 수 있어요.";
+const char* kOverlayCaptureNote = "1인칭 게임처럼 커서를 붙잡아 두는 게임은 게임 메뉴(Esc)를 먼저 열어야 메뉴를 누를 수 있어요.";
+// 확대를 시작하면 묻는 팝업 (문구는 사용자가 정함)
+const char* kAskRegionTitle = "프레임 생성 영역을 지정할까요?";
+const char* kAskRegionDesc = "(리듬게임 등 특정 영역만이 필요한 게임의 성능이 개선됩니다. 언제든 영역을 다시 지정할 수 있습니다.)";
+const char* kComputingTitle = "추천 영역 계산 중...";
+const char* kComputingFormat = "게임을 계속하면 자주 움직이는 곳을 찾아요 (%.0f / %.0f초) · Alt+Shift+G: 취소";
+const char* kComputingStill = "화면이 거의 움직이지 않아요. 게임을 플레이해 주세요 · Alt+Shift+G: 취소";
+const char* kEverywhereTitle = "좁힐 곳을 찾지 못했어요";
+const char* kEverywhereDesc = "화면 대부분이 움직여서 영역을 줄여도 이득이 없어요. 필요하면 직접 지정할 수 있어요.";
 const char* kLearnGainFormat = "%s 최근 채점 %d회 평균, 기준보다 %+.1f dB";
 const char* kShareNotYet = "채점이 200회 넘게 쌓이면 공유하기 좋아요";
 const char* kShareDesc = "잘 학습된 데이터를 파일로 주고받을 수 있어요. 방법은 저장소의 docs/sharing-profiles.md에 있어요.";
 const char* kSecondaryTexts[] = { kLearnGainFormat, kShareNotYet, kShareDesc, kRegionDesc, kRegionIdle, kRegionNone, kRegionFormat, kRegionEditing,
-                                  kRegionAdviceNoFg, kRegionAdviceNotEnough, kRegionAdviceStill, kRegionAdviceEverywhere, kRegionRecommendHelp, kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
+                                  kRegionAdviceNoFg, kRegionAdviceNotEnough, kRegionAdviceStill, kRegionAdviceEverywhere, kRegionRecommendHelp,
+                                  kOverlayHint, kOverlayShareNote, kOverlayCaptureNote, kAskRegionDesc, kComputingFormat, kComputingStill,
+                                  kEverywhereDesc, kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
                                   kFgRifeFormat, kRifeLoading, kRifeFailed, kRifeMissing,
                                   kSlowMoDesc, kSlowMoIdle, kSlowMoPlan, kSlowMoWaiting, kSlowMoRecording, kSlowMoGenerating, kSlowMoPlaying,
                                   kLearnDesc, kLearnInterpFormat, kLearnExtrapFormat, kGraphLegend, kGraphLegendExtrap, kNoProfiles, kNoHistory,
@@ -174,6 +202,7 @@ const char* kHotkeys[][2] = {
     { "Alt+Shift+P", "커서 속도 보정" },
     { "Alt+Shift+F", "프레임 생성" },
     { "Alt+Shift+T", "슬로모션 테스트" },
+    { "Alt+Shift+G", "확대 화면 위 메뉴" },
     { "Alt+Shift+Q", "종료" },
 };
 
@@ -443,6 +472,8 @@ void CreateRenderTarget()
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    // 확대 화면 위 메뉴를 그린 뒤에도 이 창의 메시지는 설정 창 컨텍스트로 처리한다.
+    if (g_mainCtx) ImGui::SetCurrentContext(g_mainCtx);
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
 
     switch (msg) {
@@ -718,6 +749,7 @@ void DrawLearning(const ScalingStatus& status)
 
     if (g_profileNames.empty() && !(active && active->interp.evalCount + active->extrap.evalCount > 0)) {
         Description(kNoProfiles);
+        if (g_inOverlay) return;
         Description(kShareDesc);
         ImportProfileButton();
         DrawShareMessage();
@@ -786,6 +818,10 @@ void DrawLearning(const ScalingStatus& status)
         enough = enough || evals >= kShareMinEvals;
     }
     if (!enough) Description(kShareNotYet);
+    if (g_inOverlay) {
+        Description(kOverlayShareNote);
+        return;
+    }
     Description(kShareDesc);
     if (ImGui::Button("공유용으로 내보내기")) {
         const std::wstring file = PickProfileFile(true, ProfilePath(L"", g_profileSelected).substr(1));
@@ -808,95 +844,11 @@ void DrawLearning(const ScalingStatus& status)
 // 화면 구성
 // ---------------------------------------------------------------------------
 
-void DrawUi()
+// 업스케일부터 화면 표시 · 마우스까지의 구역. 설정 창과 확대 화면 위 메뉴가 함께 쓴다.
+void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
 {
-    Settings& s = AppSettings();
-    ScalingStatus status = AppGetStatus();
-    bool changed = false;
     const float u = (float)P;
-
-    if (status.active) g_selected = status.target;
-    if (g_selected && !IsWindow(g_selected)) g_selected = nullptr;
-
-    ImGuiIO& io = ImGui::GetIO();
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(io.DisplaySize);
-    ImGui::Begin("##main", nullptr,
-                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
-                     ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-    // 머리말: 로고 + 이름 + 버전
-    if (g_logo) {
-        ImGui::Image((ImTextureID)g_logo.Get(), ImVec2((float)g_logoSize, (float)g_logoSize));
-        ImGui::SameLine(0, 6 * u);
-    }
-    ImGui::BeginGroup();
-    // 제목: "Open"은 연분홍, "Scaler"는 진한 분홍
-    ImGui::PushFont(g_fontTitle);
-    ImGui::TextColored(kPink, "Open");
-    ImGui::SameLine(0, 0);
-    ImGui::TextColored(kPinkDeep, "Scaler");
-    ImGui::PopFont();
-    Description(kSubtitle);
-    ImGui::EndGroup();
-    ImGui::Dummy(ImVec2(0, 2 * u));
-
-    // 대상 창과 시작/중지
-    BeginBox("##target", "대상 창", kPinkPalette);
-    {
-        const char* refreshLabel = "새로고침";
-        float refreshWidth = ImGui::CalcTextSize(refreshLabel).x + ImGui::GetStyle().FramePadding.x * 2;
-        std::string preview = g_selected ? WindowLabel(g_selected) : "확대할 창을 고르세요";
-        ImGui::SetNextItemWidth(-refreshWidth - ImGui::GetStyle().ItemSpacing.x);
-        ImGui::BeginDisabled(status.active);
-        if (ImGui::BeginCombo("##target", preview.c_str(), ImGuiComboFlags_HeightLarge)) {
-            if (ImGui::IsWindowAppearing()) RefreshWindows();
-            if (g_windows.empty()) ImGui::TextDisabled("확대할 수 있는 창이 없어요");
-            for (auto& w : g_windows) {
-                if (ImGui::Selectable(w.label.c_str(), w.hwnd == g_selected)) g_selected = w.hwnd;
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button(refreshLabel)) RefreshWindows();
-        ImGui::EndDisabled();
-
-        if (status.active) {
-            if (HeartButton("확대 중지", kPinkDeep, Rgb(0xE5487F), Rgb(0xB0124C))) AppStopScaling();
-        } else {
-            ImGui::BeginDisabled(!g_selected);
-            if (HeartButton("확대 시작", kPink, Rgb(0xF7AEC7), kPinkDeep)) {
-                HWND target = g_selected;
-                if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
-                AppStartScaling(target);
-                SetForegroundWindow(target);  // 게임 창이 활성 상태여야 마우스 좌표 변환이 동작한다
-            }
-            ImGui::EndDisabled();
-        }
-
-        // 상태: 확대 중이면 진한 하트, 대기 중이면 연한 하트
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        float lineH = ImGui::GetTextLineHeight();
-        DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)),
-                  Col(status.active ? kPinkDeep : kPinkMid));
-        ImGui::Dummy(ImVec2(7 * u, lineH));
-        ImGui::SameLine();
-        if (status.active) {
-            ImGui::Text("확대 중  %u×%u → %u×%u", status.srcW, status.srcH, status.dstW, status.dstH);
-            char fps[64];
-            snprintf(fps, sizeof(fps), kFpsFormat, status.outputFps, status.captureFps);
-            Description(fps);
-            HelpMarker("확대 화면이 이 창을 가리면 Alt+Shift+S로 중지할 수 있어요.");
-        } else {
-            ImGui::TextUnformatted("대기 중");
-            HelpMarker("게임을 창 모드로, 모니터보다 낮은 해상도로 실행한 뒤 위 목록에서 고르세요.\n"
-                       "게임 창에서 Alt+Shift+S를 눌러도 시작돼요.\n"
-                       "확대 화면이 이 창을 가리면 Alt+Shift+S로 중지합니다.");
-        }
-    }
-    EndBox();
-
+    (void)u;
     // 업스케일 (여기부터는 회색으로 눈에 덜 띄게)
     BeginBox("##upscale", "업스케일", kGrayPalette);
     RowLabel("알고리즘");
@@ -1072,6 +1024,98 @@ void DrawUi()
     HelpMarker("확대하면 커서가 배율만큼 빨라져요.\n켜면 확대 중에만 Windows 마우스 속도를 낮춰 원래 속도에 맞추고, "
                "끝나면 되돌려요.");
     EndBox();
+}
+
+void DrawUi()
+{
+    Settings& s = AppSettings();
+    ScalingStatus status = AppGetStatus();
+    bool changed = false;
+    const float u = (float)P;
+
+    if (status.active) g_selected = status.target;
+    if (g_selected && !IsWindow(g_selected)) g_selected = nullptr;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::Begin("##main", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    // 머리말: 로고 + 이름 + 버전
+    if (g_logo) {
+        ImGui::Image((ImTextureID)g_logo.Get(), ImVec2((float)g_logoSize, (float)g_logoSize));
+        ImGui::SameLine(0, 6 * u);
+    }
+    ImGui::BeginGroup();
+    // 제목: "Open"은 연분홍, "Scaler"는 진한 분홍
+    ImGui::PushFont(g_fontTitle);
+    ImGui::TextColored(kPink, "Open");
+    ImGui::SameLine(0, 0);
+    ImGui::TextColored(kPinkDeep, "Scaler");
+    ImGui::PopFont();
+    Description(kSubtitle);
+    ImGui::EndGroup();
+    ImGui::Dummy(ImVec2(0, 2 * u));
+
+    // 대상 창과 시작/중지
+    BeginBox("##target", "대상 창", kPinkPalette);
+    {
+        const char* refreshLabel = "새로고침";
+        float refreshWidth = ImGui::CalcTextSize(refreshLabel).x + ImGui::GetStyle().FramePadding.x * 2;
+        std::string preview = g_selected ? WindowLabel(g_selected) : "확대할 창을 고르세요";
+        ImGui::SetNextItemWidth(-refreshWidth - ImGui::GetStyle().ItemSpacing.x);
+        ImGui::BeginDisabled(status.active);
+        if (ImGui::BeginCombo("##target", preview.c_str(), ImGuiComboFlags_HeightLarge)) {
+            if (ImGui::IsWindowAppearing()) RefreshWindows();
+            if (g_windows.empty()) ImGui::TextDisabled("확대할 수 있는 창이 없어요");
+            for (auto& w : g_windows) {
+                if (ImGui::Selectable(w.label.c_str(), w.hwnd == g_selected)) g_selected = w.hwnd;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(refreshLabel)) RefreshWindows();
+        ImGui::EndDisabled();
+
+        if (status.active) {
+            if (HeartButton("확대 중지", kPinkDeep, Rgb(0xE5487F), Rgb(0xB0124C))) AppStopScaling();
+        } else {
+            ImGui::BeginDisabled(!g_selected);
+            if (HeartButton("확대 시작", kPink, Rgb(0xF7AEC7), kPinkDeep)) {
+                HWND target = g_selected;
+                if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
+                AppStartScaling(target);
+                SetForegroundWindow(target);  // 게임 창이 활성 상태여야 마우스 좌표 변환이 동작한다
+            }
+            ImGui::EndDisabled();
+        }
+
+        // 상태: 확대 중이면 진한 하트, 대기 중이면 연한 하트
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float lineH = ImGui::GetTextLineHeight();
+        DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)),
+                  Col(status.active ? kPinkDeep : kPinkMid));
+        ImGui::Dummy(ImVec2(7 * u, lineH));
+        ImGui::SameLine();
+        if (status.active) {
+            ImGui::Text("확대 중  %u×%u → %u×%u", status.srcW, status.srcH, status.dstW, status.dstH);
+            char fps[64];
+            snprintf(fps, sizeof(fps), kFpsFormat, status.outputFps, status.captureFps);
+            Description(fps);
+            HelpMarker("확대 화면이 이 창을 가리면 Alt+Shift+G로 확대 화면 위에 메뉴를 띄우거나, Alt+Shift+S로 중지할 수 있어요.");
+        } else {
+            ImGui::TextUnformatted("대기 중");
+            HelpMarker("게임을 창 모드로, 모니터보다 낮은 해상도로 실행한 뒤 위 목록에서 고르세요.\n"
+                       "게임 창에서 Alt+Shift+S를 눌러도 시작돼요.\n"
+                       "확대 화면이 이 창을 가리면 Alt+Shift+S로 중지합니다.");
+        }
+    }
+    EndBox();
+
+    DrawSettingsBoxes(s, status, changed);
 
     // 단축키 (회색)
     PushPalette(kGrayPalette);
@@ -1102,6 +1146,155 @@ void DrawUi()
 
     ImGui::End();
 
+    if (changed) AppSettingsChanged();
+}
+
+// 확대 화면 가운데의 팝업: 제목, 설명, 버튼 두 개. 누른 버튼의 번호(1, 2)를 돌려준다.
+int PromptBox(const char* id, const char* title, const char* desc, const char* yes, const char* no)
+{
+    const float u = (float)P;
+    ImGuiIO& io = ImGui::GetIO();
+    // 팝업은 창 안에서 열어야 하므로 보이지 않는 창을 하나 둔다.
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(1, 1));
+    ImGui::Begin("##prompthost", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    if (!ImGui::IsPopupOpen(id)) ImGui::OpenPopup(id);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(io.DisplaySize.x - 32 * u, 300.0f * u), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 2 * u);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12 * u, 10 * u));
+    ImGui::PushStyleColor(ImGuiCol_Border, kPink);
+    int pressed = 0;
+    if (ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings)) {
+        // 언더테일 대사처럼 "* "로 시작하고 하트를 붙인다.
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        const float lineH = ImGui::GetTextLineHeight();
+        DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)), Col(kPinkDeep));
+        ImGui::Dummy(ImVec2(7 * u, lineH));
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, kPinkDeep);
+        ImGui::PushTextWrapPos(0);
+        ImGui::Text("* %s", title);
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 2 * u));
+        Description(desc);
+        ImGui::Dummy(ImVec2(0, 4 * u));
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float half = (ImGui::GetContentRegionAvail().x - spacing) * 0.5f;
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2 * u);
+        ImGui::PushStyleColor(ImGuiCol_Button, kPink);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Rgb(0xF7AEC7));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, kPinkDeep);
+        ImGui::PushStyleColor(ImGuiCol_Text, kWhite);
+        ImGui::PushStyleColor(ImGuiCol_Border, kPinkDeep);
+        if (ImGui::Button(yes, ImVec2(half, 22 * u))) pressed = 1;
+        ImGui::PopStyleColor(5);
+        ImGui::SameLine();
+        if (ImGui::Button(no, ImVec2(half, 22 * u))) pressed = 2;
+        ImGui::PopStyleVar();
+        if (pressed) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    ImGui::End();
+    return pressed;
+}
+
+// "추천 영역 계산 중..." 안내: 화면 위쪽 가운데. 누를 수 없고, 그동안 게임을 계속 조작한다.
+void ComputingBanner(const OverlayView& view)
+{
+    const float u = (float)P;
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 12 * u), ImGuiCond_Always, ImVec2(0.5f, 0));
+    ImGui::SetNextWindowSize(ImVec2(std::min(io.DisplaySize.x - 32 * u, 300.0f * u), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2 * u);
+    ImGui::PushStyleColor(ImGuiCol_Border, kPink);
+    ImGui::Begin("##computing", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    const float lineH = ImGui::GetTextLineHeight();
+    // 하트가 깜박이며 기다리는 중임을 보여 준다.
+    const bool blink = std::fmod(ImGui::GetTime(), 1.0) < 0.5;
+    DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)), Col(blink ? kPinkDeep : kPinkMid));
+    ImGui::Dummy(ImVec2(7 * u, lineH));
+    ImGui::SameLine();
+    ImGui::TextColored(kPinkDeep, "* %s", kComputingTitle);
+    char text[192];
+    if (view.still) snprintf(text, sizeof(text), "%s", kComputingStill);
+    else snprintf(text, sizeof(text), kComputingFormat, std::min(view.seconds, view.needSeconds), view.needSeconds);
+    Description(text);
+    // 진행 막대
+    const float w = ImGui::GetContentRegionAvail().x;
+    ImVec2 b0 = ImGui::GetCursorScreenPos();
+    ImVec2 b1(b0.x + w, b0.y + 4 * u);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRect(b0, b1, Col(kPink), 0, 0, u);
+    const float done = (float)std::clamp(view.seconds / std::max(1.0, view.needSeconds), 0.0, 1.0);
+    dl->AddRectFilled(ImVec2(b0.x + u, b0.y + u), ImVec2(b0.x + u + std::floor((w - 2 * u) * done), b1.y - u), Col(kPinkDeep));
+    ImGui::Dummy(ImVec2(w, 4 * u));
+    ImGui::End();
+}
+
+// 확대 화면 위 메뉴: 오른쪽 가장자리에 세로 패널로 그린다. keepOpen은 닫기 버튼을 누르면 false가 된다.
+void DrawOverlayUi(bool& keepOpen)
+{
+    Settings& s = AppSettings();
+    ScalingStatus status = AppGetStatus();
+    bool changed = false;
+    const float u = (float)P;
+    ImGuiIO& io = ImGui::GetIO();
+    const float w = std::min(io.DisplaySize.x - 16 * u, 330.0f * u);
+    ImGui::SetNextWindowPos(ImVec2(std::floor(io.DisplaySize.x - w - 8 * u), 8 * u));
+    ImGui::SetNextWindowSize(ImVec2(w, std::floor(io.DisplaySize.y - 16 * u)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2 * u);
+    ImGui::PushStyleColor(ImGuiCol_Border, kPink);
+    ImGui::Begin("##overlay", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+    if (g_overlayScrollTop) {
+        ImGui::SetScrollY(0);
+        g_overlayScrollTop = false;
+    }
+
+    // 머리말: 이름 + 닫기
+    ImGui::PushFont(g_fontTitle);
+    ImGui::TextColored(kPink, "Open");
+    ImGui::SameLine(0, 0);
+    ImGui::TextColored(kPinkDeep, "Scaler");
+    ImGui::PopFont();
+    const char* closeLabel = "닫기";
+    const float closeW = ImGui::CalcTextSize(closeLabel).x + ImGui::GetStyle().FramePadding.x * 2;
+    ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - closeW);
+    if (ImGui::Button(closeLabel)) keepOpen = false;
+    Description(kOverlayHint);
+    Description(kOverlayCaptureNote);
+    ImGui::Dummy(ImVec2(0, 2 * u));
+
+    // 확대 상태와 중지
+    BeginBox("##ovtarget", "확대 중", kPinkPalette);
+    if (status.active) {
+        ImGui::Text("%u×%u → %u×%u", status.srcW, status.srcH, status.dstW, status.dstH);
+        char fps[64];
+        snprintf(fps, sizeof(fps), kFpsFormat, status.outputFps, status.captureFps);
+        Description(fps);
+        if (HeartButton("확대 중지", kPinkDeep, Rgb(0xE5487F), Rgb(0xB0124C))) {
+            AppStopScaling();
+            keepOpen = false;
+        }
+    }
+    EndBox();
+
+    DrawSettingsBoxes(s, status, changed);
+    ImGui::End();
     if (changed) AppSettingsChanged();
 }
 
@@ -1171,7 +1364,7 @@ bool GuiCreate(ID3D11Device* device, ID3D11DeviceContext* context)
 
     // ImGui
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    g_mainCtx = ImGui::CreateContext(SharedAtlas());
     ImGui::GetIO().IniFilename = nullptr;  // 창 배치 파일(imgui.ini)을 만들지 않는다
     ApplyScale(g_dpiScale);
     ImGui_ImplWin32_Init(g_hwnd);
@@ -1187,9 +1380,12 @@ bool GuiCreate(ID3D11Device* device, ID3D11DeviceContext* context)
 void GuiDestroy()
 {
     if (!g_hwnd) return;
+    GuiOverlayShutdown();
+    ImGui::SetCurrentContext(g_mainCtx);
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
-    ImGui::DestroyContext();
+    ImGui::DestroyContext(g_mainCtx);
+    g_mainCtx = nullptr;
     g_logo.Reset();
     g_rtv.Reset();
     g_swapChain.Reset();
@@ -1204,10 +1400,12 @@ void GuiRender(bool throttled)
     auto now = Clock::now();
     if (throttled && now - g_lastRender < std::chrono::milliseconds(100)) return;
     g_lastRender = now;
+    ImGui::SetCurrentContext(g_mainCtx);
 
     if (g_pendingDpi > 0 && g_pendingDpi != g_dpiScale) {
         ApplyScale(g_pendingDpi);
         ImGui_ImplDX11_InvalidateDeviceObjects();  // 다음 NewFrame에서 글꼴 텍스처를 다시 만든다
+        g_overlayFontsDirty = true;
     }
     g_pendingDpi = 0;
 
@@ -1230,3 +1428,120 @@ bool GuiIsOpen() { return g_open; }
 bool GuiIsVisible() { return g_open && !g_minimized; }
 HWND GuiHwnd() { return g_hwnd; }
 HWND GuiSelectedWindow() { return g_selected; }
+
+// ---------------------------------------------------------------------------
+// 확대 화면 위 메뉴 (모니터가 하나라 설정 창이 확대 화면에 가려질 때)
+// ---------------------------------------------------------------------------
+
+int GuiOverlayRender(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTargetView* rtv, int width, int height,
+                     const OverlayView& view)
+{
+    ImGuiContext* previous = ImGui::GetCurrentContext();
+    if (!g_overlayCtx) {
+        g_overlayCtx = ImGui::CreateContext(SharedAtlas());
+        ImGui::SetCurrentContext(g_overlayCtx);
+        ImGui::GetIO().IniFilename = nullptr;
+        if (!g_mainCtx) {
+            // 설정 창 없이 실행했으면 (--no-gui) 글꼴을 여기서 만든다.
+            g_device = device;
+            g_ctx = context;
+            P = 2;
+            SetupFonts();
+        }
+        SetupStyle();
+        ImGui::GetStyle().Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.45f);
+        ImGui_ImplDX11_Init(device, context);
+        g_overlayLast = Clock::now();
+    } else {
+        ImGui::SetCurrentContext(g_overlayCtx);
+    }
+    if (g_overlayFontsDirty) {
+        SetupStyle();
+        ImGui::GetStyle().Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.45f);
+        ImGui_ImplDX11_InvalidateDeviceObjects();
+        g_overlayFontsDirty = false;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)width, (float)height);
+    const auto now = Clock::now();
+    io.DeltaTime = std::max(1e-4f, std::chrono::duration<float>(now - g_overlayLast).count());
+    g_overlayLast = now;
+
+    ImGui_ImplDX11_NewFrame();
+    ImGui::NewFrame();
+    bool keepOpen = true;
+    int action = OVERLAY_ACTION_NONE;
+    g_inOverlay = true;
+    if (view.menu) DrawOverlayUi(keepOpen);
+    if (!keepOpen) action = OVERLAY_ACTION_CLOSE_MENU;
+    switch (view.prompt) {
+    case OVERLAY_PROMPT_ASK_REGION:
+        switch (PromptBox("##askregion", kAskRegionTitle, kAskRegionDesc, "예", "아니오")) {
+        case 1: action = OVERLAY_ACTION_YES; break;
+        case 2: action = OVERLAY_ACTION_NO; break;
+        }
+        break;
+    case OVERLAY_PROMPT_EVERYWHERE:
+        switch (PromptBox("##everywhere", kEverywhereTitle, kEverywhereDesc, "직접 지정하기", "닫기")) {
+        case 1: action = OVERLAY_ACTION_MANUAL; break;
+        case 2: action = OVERLAY_ACTION_DISMISS; break;
+        }
+        break;
+    case OVERLAY_PROMPT_COMPUTING:
+        ComputingBanner(view);
+        break;
+    }
+    g_inOverlay = false;
+    ImGui::Render();
+    context->OMSetRenderTargets(1, &rtv, nullptr);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    ImGui::SetCurrentContext(previous ? previous : g_mainCtx);
+    return action;
+}
+
+void GuiOverlayMouse(UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (!g_overlayCtx) return;
+    ImGuiContext* previous = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(g_overlayCtx);
+    ImGuiIO& io = ImGui::GetIO();
+    switch (msg) {
+    case WM_MOUSEMOVE: io.AddMousePosEvent((float)(short)LOWORD(lp), (float)(short)HIWORD(lp)); break;
+    case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: io.AddMouseButtonEvent(0, true); break;
+    case WM_LBUTTONUP: io.AddMouseButtonEvent(0, false); break;
+    case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK: io.AddMouseButtonEvent(1, true); break;
+    case WM_RBUTTONUP: io.AddMouseButtonEvent(1, false); break;
+    case WM_MOUSEWHEEL: io.AddMouseWheelEvent(0, (float)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA); break;
+    case WM_MOUSELEAVE: io.AddMousePosEvent(-FLT_MAX, -FLT_MAX); break;
+    }
+    ImGui::SetCurrentContext(previous ? previous : g_mainCtx);
+}
+
+void GuiOverlayReset()
+{
+    // 메뉴를 닫을 때 눌린 채로 남은 버튼이 없게 한다.
+    if (!g_overlayCtx) return;
+    ImGuiContext* previous = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(g_overlayCtx);
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMouseButtonEvent(0, false);
+    io.AddMouseButtonEvent(1, false);
+    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+    g_overlayScrollTop = true;
+    ImGui::SetCurrentContext(previous ? previous : g_mainCtx);
+}
+
+void GuiOverlayShutdown()
+{
+    if (!g_overlayCtx) return;
+    ImGui::SetCurrentContext(g_overlayCtx);
+    ImGui_ImplDX11_Shutdown();
+    ImGui::DestroyContext(g_overlayCtx);
+    g_overlayCtx = nullptr;
+    ImGui::SetCurrentContext(g_mainCtx);
+    if (!g_mainCtx && g_atlas) {
+        IM_DELETE(g_atlas);
+        g_atlas = nullptr;
+    }
+}

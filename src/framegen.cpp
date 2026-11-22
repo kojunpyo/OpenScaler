@@ -772,9 +772,17 @@ std::vector<float> FrameGen::ChangeRates(int& w, int& h) const
     return rate;
 }
 
-FrameGen::RegionAdvice FrameGen::RecommendRegion(float out[4]) const
+void FrameGen::ResetChange()
 {
-    if (m_change.empty() || m_changeSeconds < kChangeMinSeconds) return REGION_NOT_ENOUGH;
+    m_change.clear();
+    m_changeW = m_changeH = 0;
+    m_changeSeconds = 0;
+    m_changeTime = -1;
+}
+
+FrameGen::RegionAdvice FrameGen::RecommendRegion(float out[4], double minSeconds) const
+{
+    if (m_change.empty() || m_changeSeconds < std::max(minSeconds, kChangeMinSeconds)) return REGION_NOT_ENOUGH;
     int gw, gh;
     const std::vector<float> rate = ChangeRates(gw, gh);
     std::vector<float> sorted = rate;

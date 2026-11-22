@@ -63,7 +63,7 @@ using Clock = std::chrono::steady_clock;
 
 const char* const kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2", "FSR 1.0" };
 
-enum HotkeyId { HK_TOGGLE = 1, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_CURSOR_SPEED, HK_FRAMEGEN, HK_SLOWMO, HK_SLOWMO_PAUSE, HK_SLOWMO_PREV, HK_SLOWMO_NEXT, HK_QUIT };
+enum HotkeyId { HK_TOGGLE = 1, HK_MENU, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_CURSOR_SPEED, HK_FRAMEGEN, HK_SLOWMO, HK_SLOWMO_PAUSE, HK_SLOWMO_PREV, HK_SLOWMO_NEXT, HK_QUIT };
 
 // HLSL cbuffer Params와 같은 레이아웃 (16바이트 정렬)
 struct ShaderParams {
@@ -443,9 +443,43 @@ static void InitD3D()
 // 오버레이 창
 // ---------------------------------------------------------------------------
 
+// 확대 화면 위 메뉴 (Alt+Shift+G). 열려 있는 동안 확대 화면 창이 마우스를 받고, 게임 창의 포커스는 그대로 둔다.
+static bool g_overlayMenu = false;
+// 확대를 시작하면 묻는 "프레임 생성 영역을 지정할까요?"와 그 뒤의 추천 영역 계산
+enum RegionWizard { WIZARD_NONE, WIZARD_ASK, WIZARD_COMPUTING, WIZARD_EVERYWHERE };
+static int g_wizard = WIZARD_NONE;
+static const double kWizardSeconds = 10.0;  // "예"를 누른 뒤 이만큼 모아 추천한다
+static bool g_autoOverlay = false;  // 확대를 시작하면 메뉴와 팝업을 띄운다 (설정 창을 쓸 때. --no-gui 측정과 시험에서는 끈다)
+static bool g_overlayInteractive = false;  // 지금 확대 화면 창이 마우스를 받는지 (메뉴나 버튼이 있는 팝업이 떠 있을 때)
+
 static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (msg == WM_NCHITTEST) return HTTRANSPARENT;
+    switch (msg) {
+    case WM_NCHITTEST:
+        return g_overlayInteractive ? HTCLIENT : HTTRANSPARENT;
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;  // 메뉴를 눌러도 게임 창의 포커스를 빼앗지 않는다
+    case WM_SETCURSOR:
+        if (g_overlayInteractive) {
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_RBUTTONDBLCLK:
+    case WM_MOUSEWHEEL:
+        if (!g_overlayInteractive) break;
+        // 끄는 동안(슬라이더) 창 밖으로 나가도 놓치지 않게 붙잡는다.
+        if (msg == WM_LBUTTONDOWN) SetCapture(hwnd);
+        else if (msg == WM_LBUTTONUP) ReleaseCapture();
+        GuiOverlayMouse(msg, wp, lp);
+        return 0;
+    }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
@@ -662,6 +696,7 @@ static LRESULT CALLBACK RegionEditorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+static FrameGen::RegionAdvice RegionRecommend(float r[4], double minSeconds = 5.0);
 static void RegionEditBegin(const float* initial = nullptr)
 {
     if (!g_scaling || !g_scaling->layoutValid || g_region.hwnd) return;
@@ -773,8 +808,8 @@ static void UpdateCursor(ScalingSession* s)
 
     POINT p;
     if (!GetCursorPos(&p)) return;
-    // 영역 편집 중에는 편집 창을 직접 끌어야 하므로 커서를 원본 창으로 옮기지 않는다.
-    if (g_region.hwnd) {
+    // 영역 편집 중이나 확대 화면 위 메뉴가 열려 있으면 그 창을 직접 눌러야 하므로 커서를 원본 창으로 옮기지 않는다.
+    if (g_region.hwnd || g_overlayInteractive) {
         if (s->cursorMapped) ReleaseCursor(s, SrcToDst(s, ClampToRect(p, s->srcScreen)));
         return;
     }
@@ -919,9 +954,50 @@ static bool LoadCursorImage(HCURSOR hc, CursorImage& img)
 // 스케일링 시작 / 종료
 // ---------------------------------------------------------------------------
 
+// 메뉴나 버튼이 있는 팝업이 떠 있으면 확대 화면 창이 클릭을 받고, 없으면 다시 통과시킨다.
+static void UpdateOverlayInput()
+{
+    const bool want = g_scaling && g_scaling->overlay && (g_overlayMenu || g_wizard == WIZARD_ASK || g_wizard == WIZARD_EVERYWHERE);
+    if (want == g_overlayInteractive) return;
+    g_overlayInteractive = want;
+    GuiOverlayReset();
+    if (!g_scaling || !g_scaling->overlay) return;
+    HWND overlay = g_scaling->overlay;
+    LONG_PTR ex = GetWindowLongPtrW(overlay, GWL_EXSTYLE);
+    ex = want ? (ex & ~WS_EX_TRANSPARENT) : (ex | WS_EX_TRANSPARENT);
+    SetWindowLongPtrW(overlay, GWL_EXSTYLE, ex);
+    SetWindowPos(overlay, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    if (want) {
+        ReleaseCapture();
+    } else if (GetForegroundWindow() != g_scaling->target) {
+        // 메뉴에서 영역 편집 창을 띄웠다면 포커스가 옮겨 갔으므로 게임 창으로 돌려준다 (커서 변환은 게임 창이 활성일 때만 한다).
+        SetForegroundWindow(g_scaling->target);
+    }
+}
+
+static void SetOverlayMenu(bool open)
+{
+    if (!g_scaling || !g_scaling->overlay) open = false;
+    if (g_overlayMenu == open) return;
+    g_overlayMenu = open;
+    UpdateOverlayInput();
+    printf("\n[메뉴] 확대 화면 위 메뉴를 %s\n", open ? "열었습니다" : "닫았습니다");
+}
+
+static void SetWizard(int state)
+{
+    if (g_wizard == state) return;
+    g_wizard = state;
+    UpdateOverlayInput();
+    static const char* const kNames[] = { "끝", "묻는 중", "추천 영역 계산 중", "좁힐 곳 없음" };
+    printf("\n[영역 팝업] %s\n", kNames[state]);
+}
+
 static void StopScaling()
 {
     if (!g_scaling) return;
+    SetOverlayMenu(false);
+    SetWizard(WIZARD_NONE);
     if (g_scaling->cursorMapped) {
         POINT p;
         GetCursorPos(&p);
@@ -1095,6 +1171,11 @@ static void StartScaling(HWND target)
     s->session.StartCapture();
     s->statTime = Clock::now();
     g_scaling = s;
+    // 모니터가 하나여도 설정을 바꿀 수 있게 메뉴를 열고, 프레임 생성 영역을 지정할지 묻는다.
+    if (g_autoOverlay) {
+        SetOverlayMenu(true);
+        SetWizard(WIZARD_ASK);
+    }
 
     char titleUtf8[768] = {};
     WideCharToMultiByte(CP_UTF8, 0, title, -1, titleUtf8, sizeof(titleUtf8), nullptr, nullptr);
@@ -1697,6 +1778,50 @@ static void RenderFrame()
         // Pass 4: 화면 위 상태 표시
         DrawOsd(s);
 
+        // Pass 5: 확대 화면 위 메뉴와 팝업. 영역 편집 창을 띄운 동안에는 숨겨 편집 창을 가리지 않는다.
+        if ((g_overlayMenu || g_wizard != WIZARD_NONE) && !g_region.hwnd) {
+            OverlayView view;
+            view.menu = g_overlayMenu;
+            view.needSeconds = kWizardSeconds;
+            if (g_wizard == WIZARD_COMPUTING) {
+                // 추천 영역이 나오면 편집 창을 띄워 사용자가 다듬게 한다.
+                float r[4];
+                const int advice = (int)RegionRecommend(r, kWizardSeconds);
+                view.seconds = g_frameGen ? g_frameGen->ChangeSeconds() : 0;
+                view.still = advice == FrameGen::REGION_STILL;
+                if (advice == FrameGen::REGION_OK) {
+                    SetWizard(WIZARD_NONE);
+                    printf("\n[영역 팝업] 추천 영역 %.3f,%.3f,%.3f,%.3f\n", r[0], r[1], r[2], r[3]);
+                    RegionEditBegin(r);
+                } else if (advice == FrameGen::REGION_EVERYWHERE) {
+                    SetWizard(WIZARD_EVERYWHERE);
+                }
+            }
+            static const int kPrompt[] = { OVERLAY_PROMPT_NONE, OVERLAY_PROMPT_ASK_REGION, OVERLAY_PROMPT_COMPUTING, OVERLAY_PROMPT_EVERYWHERE };
+            view.prompt = kPrompt[g_wizard];
+            if (!g_region.hwnd && (view.menu || view.prompt != OVERLAY_PROMPT_NONE)) {
+                switch (GuiOverlayRender(g_device.get(), g_ctx.get(), s->backBufferRtv.get(), (int)s->outW, (int)s->outH, view)) {
+                case OVERLAY_ACTION_CLOSE_MENU: SetOverlayMenu(false); break;
+                case OVERLAY_ACTION_YES:
+                    // 영역은 프레임 생성에만 쓰이므로 꺼져 있으면 켠다. 누른 뒤의 화면만 보도록 모은 변화를 버린다.
+                    if (!g_settings.frameGen) {
+                        g_settings.frameGen = true;
+                        AppSettingsChanged();
+                    }
+                    if (g_frameGen) g_frameGen->ResetChange();
+                    g_overlayMenu = false;  // 메뉴를 숨겨 게임 화면이 보이고 마우스도 게임으로 가게 한다
+                    SetWizard(WIZARD_COMPUTING);
+                    break;
+                case OVERLAY_ACTION_NO: SetWizard(WIZARD_NONE); break;
+                case OVERLAY_ACTION_MANUAL:
+                    SetWizard(WIZARD_NONE);
+                    RegionEditBegin();
+                    break;
+                case OVERLAY_ACTION_DISMISS: SetWizard(WIZARD_NONE); break;
+                }
+            }
+        }
+
         // 슬로모션 재생은 시간이 아니라 화면을 그린 횟수로 넘긴다. 그려야 할 때를 놓쳐도 건너뛰는 프레임이 없다.
         if (g_slowMo.state == SLOWMO_PLAYING && !g_slowMo.paused && ++g_slowMo.vsyncs >= g_slowMo.holdVsyncs) {
             g_slowMo.vsyncs = 0;
@@ -1806,6 +1931,14 @@ static bool HandleHotkey(int id)
     case HK_SHARP_DOWN:
         g_settings.sharpness = std::max(0.0f, g_settings.sharpness - 0.1f);
         break;
+    case HK_MENU:
+        if (g_wizard == WIZARD_COMPUTING) {
+            SetWizard(WIZARD_NONE);  // 추천 영역 계산을 그만두고 메뉴를 연다
+            SetOverlayMenu(true);
+        } else {
+            SetOverlayMenu(!g_overlayMenu);
+        }
+        return true;
     case HK_QUIT:
         return false;
     }
@@ -1833,12 +1966,12 @@ void AppRegionEditEnd(bool save) { RegionEditEnd(save); }
 bool AppRegionEditing() { return g_region.hwnd != nullptr; }
 void AppRegionClear() { RegionClear(); }
 
-static FrameGen::RegionAdvice RegionRecommend(float r[4])
+static FrameGen::RegionAdvice RegionRecommend(float r[4], double minSeconds)
 {
     if (!g_scaling || !g_settings.frameGen) return (FrameGen::RegionAdvice)-1;
     // 프레임 생성이 켜져 있지만 아직 준비 중이면 모으는 중으로 본다.
     if (!g_frameGen || !g_scaling->fgWasOn) return FrameGen::REGION_NOT_ENOUGH;
-    return g_frameGen->RecommendRegion(r);
+    return g_frameGen->RecommendRegion(r, minSeconds);
 }
 
 int AppRegionRecommend()
@@ -1964,7 +2097,7 @@ static void RegisterHotkeys()
         { HK_SHARP_DOWN, VK_DOWN, "Alt+Shift+Down" }, { HK_COMPARE, 'C', "Alt+Shift+C" },
         { HK_OSD, 'O', "Alt+Shift+O" },           { HK_CURSOR_SPEED, 'P', "Alt+Shift+P" },
         { HK_FRAMEGEN, 'F', "Alt+Shift+F" },      { HK_SLOWMO, 'T', "Alt+Shift+T" },
-        { HK_QUIT, 'Q', "Alt+Shift+Q" },
+        { HK_QUIT, 'Q', "Alt+Shift+Q" },          { HK_MENU, 'G', "Alt+Shift+G" },
     };
     for (auto& k : keys) {
         if (!RegisterHotKey(nullptr, k.id, mods, k.vk))
@@ -2042,6 +2175,7 @@ int wmain(int argc, wchar_t** argv)
     bool regionEditAuto = false;  // 테스트용: 확대가 시작되면 영역 편집 창을 띄운다
     double regionRecommendAt = -1;  // 테스트용: 확대 후 이 초가 지나면 추천 영역을 출력한다 (편집 창은 띄우지 않는다)
     double scalingSince = -1;
+    bool overlayMenuAuto = false;  // 테스트용: 확대가 시작되면 확대 화면 위 메뉴를 연다 (게임에 단축키를 보내지 않고 시험)
     bool useGui = true;
     for (int i = 1; i < argc; i++) {
         std::wstring a = argv[i];
@@ -2095,6 +2229,8 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--fg-log" && i + 1 < argc) _wfopen_s(&g_fgLog, argv[++i], L"w");
         else if (a == L"--slowmo-auto" && i + 1 < argc) slowMoAuto = _wtof(argv[++i]);
         else if (a == L"--region-edit") regionEditAuto = true;
+        else if (a == L"--overlay-menu") overlayMenuAuto = true;
+        else if (a == L"--region-wizard") g_autoOverlay = true;  // 테스트용: --no-gui에서도 확대를 시작하면 메뉴와 영역 팝업을 띄운다
         else if (a == L"--region-recommend" && i + 1 < argc) regionRecommendAt = _wtof(argv[++i]);
         else if (a == L"--fg-region" && i + 1 < argc) {
             // "x,y,w,h" (게임 화면에 대한 비율) 또는 "none"(화면 전체)
@@ -2168,6 +2304,7 @@ int wmain(int argc, wchar_t** argv)
             return exitCode;
         }
         RegisterHotkeys();
+        if (useGui) g_autoOverlay = true;  // 모니터가 하나면 설정 창이 가려지므로 확대하면 메뉴와 영역 팝업을 띄운다
         g_frameGenLoading = std::async(std::launch::async, [] {
             auto frameGen = std::make_unique<FrameGen>(g_device.get(), g_ctx.get());
             frameGen->SetRealtime(true);
@@ -2216,6 +2353,10 @@ int wmain(int argc, wchar_t** argv)
                     RegionEditBegin();
                     regionEditAuto = false;
                 }
+                if (overlayMenuAuto && g_scaling && g_scaling->layoutValid) {
+                    SetOverlayMenu(true);
+                    overlayMenuAuto = false;
+                }
                 if (g_scaling && scalingSince < 0) scalingSince = NowSeconds();
                 if (regionRecommendAt >= 0 && scalingSince >= 0 && NowSeconds() - scalingSince >= regionRecommendAt) {
                     float r[4] = {};
@@ -2244,6 +2385,7 @@ int wmain(int argc, wchar_t** argv)
         StopScaling();
         if (g_frameGenLoading.valid()) g_frameGenLoading.wait();
         g_frameGen.reset();  // 신경망 스레드를 D3D 정리 전에 끝낸다
+        GuiOverlayShutdown();  // 설정 창 없이 실행한 경우 (설정 창이 있으면 GuiDestroy에서도 부른다)
         GuiDestroy();
     } catch (const winrt::hresult_error& e) {
         std::string text = "오류가 발생했습니다.\n\n" + winrt::to_string(e.message());

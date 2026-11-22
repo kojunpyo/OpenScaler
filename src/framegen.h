@@ -89,7 +89,9 @@ public:
 
     // 영역 추천: 최근 게임 프레임에서 자주 바뀐 곳을 감싸는 사각형 (게임 화면 전체에 대한 비율 x, y, 너비, 높이).
     enum RegionAdvice { REGION_OK, REGION_NOT_ENOUGH, REGION_STILL, REGION_EVERYWHERE };
-    RegionAdvice RecommendRegion(float out[4]) const;
+    // minSeconds: 이만큼 모으기 전에는 추천하지 않는다 (확대 시작 팝업에서 "예"를 누르면 그 뒤 10초를 본다).
+    RegionAdvice RecommendRegion(float out[4], double minSeconds = 5.0) const;
+    void ResetChange();  // 모은 변화를 버리고 지금부터 다시 모은다
     double ChangeSeconds() const { return m_changeSeconds; }  // 추천에 쓸 움직임을 모은 시간 (초)
     // 묶음마다 최근 바뀐 비율 (테스트 출력용)
     std::vector<float> ChangeRates(int& w, int& h) const;
