@@ -662,7 +662,7 @@ static LRESULT CALLBACK RegionEditorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-static void RegionEditBegin()
+static void RegionEditBegin(const float* initial = nullptr)
 {
     if (!g_scaling || !g_scaling->layoutValid || g_region.hwnd) return;
     static bool registered = false;
@@ -680,7 +680,10 @@ static void RegionEditBegin()
     // 프레임 생성이 거절하는 크기(원본 64픽셀)보다 작게 줄이지 못하게 한다.
     g_region.minSize = std::max(32, (int)std::ceil(64.0 * w / std::max(1u, s->srcW)));
     const GameProfile& p = s->profile;
-    if (p.HasRegion())
+    if (initial)
+        g_region.rc = { std::lround(initial[0] * w), std::lround(initial[1] * h), std::lround((initial[0] + initial[2]) * w),
+                        std::lround((initial[1] + initial[3]) * h) };
+    else if (p.HasRegion())
         g_region.rc = { std::lround(p.regionX * w), std::lround(p.regionY * h), std::lround((p.regionX + p.regionW) * w),
                         std::lround((p.regionY + p.regionH) * h) };
     else
@@ -1830,6 +1833,22 @@ void AppRegionEditEnd(bool save) { RegionEditEnd(save); }
 bool AppRegionEditing() { return g_region.hwnd != nullptr; }
 void AppRegionClear() { RegionClear(); }
 
+static FrameGen::RegionAdvice RegionRecommend(float r[4])
+{
+    if (!g_scaling || !g_settings.frameGen) return (FrameGen::RegionAdvice)-1;
+    // 프레임 생성이 켜져 있지만 아직 준비 중이면 모으는 중으로 본다.
+    if (!g_frameGen || !g_scaling->fgWasOn) return FrameGen::REGION_NOT_ENOUGH;
+    return g_frameGen->RecommendRegion(r);
+}
+
+int AppRegionRecommend()
+{
+    float r[4];
+    const int advice = (int)RegionRecommend(r);
+    if (advice == FrameGen::REGION_OK) RegionEditBegin(r);
+    return advice;
+}
+
 // 공유받은 학습 데이터를 profiles 폴더에 넣는다. 같은 게임의 기존 파일은 profiles/backup으로 옮겨 둔다.
 bool AppImportProfile(const std::wstring& file, std::wstring& gameName, std::wstring& message)
 {
@@ -2021,6 +2040,8 @@ int wmain(int argc, wchar_t** argv)
     double duration = 0;
     double slowMoAuto = -1;
     bool regionEditAuto = false;  // 테스트용: 확대가 시작되면 영역 편집 창을 띄운다
+    double regionRecommendAt = -1;  // 테스트용: 확대 후 이 초가 지나면 추천 영역을 출력한다 (편집 창은 띄우지 않는다)
+    double scalingSince = -1;
     bool useGui = true;
     for (int i = 1; i < argc; i++) {
         std::wstring a = argv[i];
@@ -2074,6 +2095,7 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--fg-log" && i + 1 < argc) _wfopen_s(&g_fgLog, argv[++i], L"w");
         else if (a == L"--slowmo-auto" && i + 1 < argc) slowMoAuto = _wtof(argv[++i]);
         else if (a == L"--region-edit") regionEditAuto = true;
+        else if (a == L"--region-recommend" && i + 1 < argc) regionRecommendAt = _wtof(argv[++i]);
         else if (a == L"--fg-region" && i + 1 < argc) {
             // "x,y,w,h" (게임 화면에 대한 비율) 또는 "none"(화면 전체)
             const std::wstring v = argv[++i];
@@ -2193,6 +2215,22 @@ int wmain(int argc, wchar_t** argv)
                 if (regionEditAuto && g_scaling && g_scaling->layoutValid) {
                     RegionEditBegin();
                     regionEditAuto = false;
+                }
+                if (g_scaling && scalingSince < 0) scalingSince = NowSeconds();
+                if (regionRecommendAt >= 0 && scalingSince >= 0 && NowSeconds() - scalingSince >= regionRecommendAt) {
+                    float r[4] = {};
+                    const int advice = (int)RegionRecommend(r);
+                    printf("\n[영역 추천] 결과 %d (0: 추천함, 1: 모은 시간 부족, 2: 움직임 적음, 3: 거의 전체, -1: 프레임 생성 꺼짐), 모은 시간 %.1f초, 영역 %.3f,%.3f,%.3f,%.3f\n",
+                           advice, g_frameGen ? g_frameGen->ChangeSeconds() : 0.0, r[0], r[1], r[2], r[3]);
+                    if (g_frameGen) {
+                        int gw = 0, gh = 0;
+                        const std::vector<float> rates = g_frameGen->ChangeRates(gw, gh);
+                        for (int y = 0; y < gh; y++) {
+                            for (int x = 0; x < gw; x++) printf("%c", " .:-=+*#%@"[std::clamp((int)(rates[(size_t)y * gw + x] * 10), 0, 9)]);
+                            printf("\n");
+                        }
+                    }
+                    regionRecommendAt = -1;
                 }
                 if (useGui) GuiRender(true);  // 확대 화면 속도에 영향이 없도록 가끔만 그린다
             } else if (useGui && GuiIsVisible()) {

@@ -87,6 +87,13 @@ public:
 
     const FgStats& Stats() const { return m_stats; }
 
+    // 영역 추천: 최근 게임 프레임에서 자주 바뀐 곳을 감싸는 사각형 (게임 화면 전체에 대한 비율 x, y, 너비, 높이).
+    enum RegionAdvice { REGION_OK, REGION_NOT_ENOUGH, REGION_STILL, REGION_EVERYWHERE };
+    RegionAdvice RecommendRegion(float out[4]) const;
+    double ChangeSeconds() const { return m_changeSeconds; }  // 추천에 쓸 움직임을 모은 시간 (초)
+    // 묶음마다 최근 바뀐 비율 (테스트 출력용)
+    std::vector<float> ChangeRates(int& w, int& h) const;
+
     // 슬로모션 테스트: 짧게 녹화한 진짜 프레임 사이를 미리 채워 두고 한 장씩 보여 준다 ----------
     struct SlowMoFrame {
         ID3D11ShaderResourceView* srv = nullptr;   // 보여 줄 영상
@@ -148,7 +155,8 @@ private:
     static constexpr int kLevels = 5;  // 원본, 1/2, 1/4, 1/8, 1/16
     // 최근 3장 + 채점이 끝날 때까지 남겨 둘 4장 + 다음 프레임을 받을 빈 슬롯
     static constexpr int kFrames = 8;
-    static constexpr int kDuplicateLevel = 3;  // 중복 프레임 검사에 쓰는 단계 (1/8)
+    // 중복 프레임 검사에 쓰는 단계 (1/4). 8x8 묶음마다 차이를 구하므로 원본 32픽셀 칸마다 바뀌었는지도 알 수 있다 (영역 추천).
+    static constexpr int kDuplicateLevel = 2;
 
     struct Frame {
         com_ptr<ID3D11Texture2D> color;  // 움직임 추정과 합성에 쓰는 영상 (영역을 지정했으면 그 부분만)
@@ -228,7 +236,7 @@ private:
     float MseFromStaging(ID3D11Texture2D* staging, UINT w, UINT h);
     float BlockingMsePsnr(ID3D11ShaderResourceView* x, ID3D11ShaderResourceView* y);
     com_ptr<ID3D11Texture2D> QueueDuplicate(const Frame& a, const Frame& b);  // 두 프레임의 차이를 읽어 올 준비를 한다
-    bool ReadDuplicate(ID3D11Texture2D* staging, bool block, bool& same);     // GPU가 아직 끝내지 않았으면 false
+    bool ReadDuplicate(ID3D11Texture2D* staging, bool block, bool& same, double time = -1);  // GPU가 아직 끝내지 않았으면 false. time이 있으면 영역 추천용으로 쌓는다
     bool IsDuplicate(const Frame& a, const Frame& b);                          // 기다려서 바로 판단한다 (슬로모션 녹화)
 
     // 채점: 실시간에서는 나눠서 새 게임 프레임이 오지 않은 화면에 한 단계씩 돌린다 (한 화면에 몰리면 144Hz에서 끊긴다).
@@ -345,6 +353,12 @@ private:
     double m_rifeLagMedianMs = 0;
     bool m_realtime = false;
     Incoming m_incoming;
+
+    // 영역 추천: 중복 검사의 8x8 묶음(원본 32픽셀)마다 최근 10초 동안 바뀐 비율. 작업 영역(영역을 지정했으면 그 안) 기준이다.
+    std::vector<float> m_change;
+    int m_changeW = 0, m_changeH = 0;
+    double m_changeTime = -1;     // 마지막으로 쌓은 게임 프레임 시각
+    double m_changeSeconds = 0;   // 쌓은 시간 (최대 kChangeWindow)
     int m_rifeHeightLimit = 10000;      // 너무 느려서 낮춘 입력 높이. 이번 실행 동안 유지한다
     float m_rifeLastInferMs = 0;
 

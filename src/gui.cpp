@@ -148,10 +148,17 @@ const char* kRegionIdle = "확대를 시작하면 지정할 수 있어요";
 const char* kRegionNone = "지정한 영역 없음 · 화면 전체에 만들어요";
 const char* kRegionFormat = "지정한 영역: 가로 %d%% · 세로 %d%% (원본 %d×%d)";
 const char* kRegionEditing = "확대 화면에서 테두리를 끌어 조절하고 Enter로 저장해요";
+const char* kRegionAdviceNoFg = "프레임 생성을 켜고 게임을 10초쯤 한 뒤 눌러 주세요";
+const char* kRegionAdviceNotEnough = "움직임을 모으는 중이에요. 게임을 몇 초 더 한 뒤 눌러 주세요";
+const char* kRegionAdviceStill = "화면이 거의 움직이지 않았어요. 플레이 중에 눌러 주세요";
+const char* kRegionAdviceEverywhere = "화면 대부분이 움직여서 좁힐 곳이 없어요";
+const char* kRegionRecommendHelp = "최근 10초 동안 자주 바뀐 곳을 감싸 영역 편집 창에 그려 줘요. 테두리를 다듬고 Enter로 저장하면 돼요.";
+const char* g_regionAdvice = nullptr;  // 영역 추천을 하지 못한 까닭
 const char* kLearnGainFormat = "%s 최근 채점 %d회 평균, 기준보다 %+.1f dB";
 const char* kShareNotYet = "채점이 200회 넘게 쌓이면 공유하기 좋아요";
 const char* kShareDesc = "잘 학습된 데이터를 파일로 주고받을 수 있어요. 방법은 저장소의 docs/sharing-profiles.md에 있어요.";
-const char* kSecondaryTexts[] = { kLearnGainFormat, kShareNotYet, kShareDesc, kRegionDesc, kRegionIdle, kRegionNone, kRegionFormat, kRegionEditing, kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
+const char* kSecondaryTexts[] = { kLearnGainFormat, kShareNotYet, kShareDesc, kRegionDesc, kRegionIdle, kRegionNone, kRegionFormat, kRegionEditing,
+                                  kRegionAdviceNoFg, kRegionAdviceNotEnough, kRegionAdviceStill, kRegionAdviceEverywhere, kRegionRecommendHelp, kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
                                   kFgRifeFormat, kRifeLoading, kRifeFailed, kRifeMissing,
                                   kSlowMoDesc, kSlowMoIdle, kSlowMoPlan, kSlowMoWaiting, kSlowMoRecording, kSlowMoGenerating, kSlowMoPlaying,
                                   kLearnDesc, kLearnInterpFormat, kLearnExtrapFormat, kGraphLegend, kGraphLegendExtrap, kNoProfiles, kNoHistory,
@@ -975,13 +982,27 @@ void DrawUi()
             ImGui::SameLine();
             if (ImGui::Button("취소")) AppRegionEditEnd(false);
         } else {
-            if (ImGui::Button("영역 지정하기")) AppRegionEditBegin();
+            if (ImGui::Button("영역 지정하기")) {
+                AppRegionEditBegin();
+                g_regionAdvice = nullptr;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("영역 추천")) {
+                static const char* const kAdvice[] = { nullptr, kRegionAdviceNotEnough, kRegionAdviceStill, kRegionAdviceEverywhere };
+                const int advice = AppRegionRecommend();
+                g_regionAdvice = advice >= 0 && advice < 4 ? kAdvice[advice] : kRegionAdviceNoFg;
+            }
+            HelpMarker(kRegionRecommendHelp);
             if (profile && profile->HasRegion()) {
                 ImGui::SameLine();
-                if (ImGui::Button("영역 지우기")) AppRegionClear();
+                if (ImGui::Button("영역 지우기")) {
+                    AppRegionClear();
+                    g_regionAdvice = nullptr;
+                }
             }
         }
         ImGui::EndDisabled();
+        if (g_regionAdvice && status.active && !editing) Description(g_regionAdvice);
     }
     if (status.fgActive) {
         char fgText[160];

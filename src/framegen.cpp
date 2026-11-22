@@ -37,7 +37,12 @@ const int kWideSearchRadius = 16;    // 원본 기준 약 128픽셀
 const double kRifeBudget = 0.7;      // 신경망이 프레임 간격의 이 비율을 넘으면 입력 해상도를 낮춘다
 const double kSlowMoWarmup = 0.25;   // 슬로모션 녹화 직후 드라이버가 자리를 잡는 동안의 프레임은 쓰지 않는다 (초)
 const double kLongGap = 2.5;         // 보통 간격의 이 배수를 넘는 쌍은 긴 간격으로 보고 추정 설정을 바꾼다
-const float kDuplicateMse = 2e-7f;   // 1/8 영상의 한 묶음이 이보다 달라야 새 프레임으로 본다 (8비트 반올림 오차 수준)
+const float kDuplicateMse = 2e-7f;   // 1/4 영상의 한 묶음이 이보다 달라야 새 프레임으로 본다 (8비트 반올림 오차 수준)
+// 영역 추천: 묶음의 차이가 이보다 크면 "바뀐 곳"으로 센다 (밝기 차이 약 1.6/255, 반올림 오차보다 충분히 크다).
+// 3/255로 두었더니 어두운 마인크래프트에서 시점을 돌려도 칸마다 10~30%만 바뀐 것으로 나왔다.
+const float kChangeMse = 4e-5f;
+const double kChangeWindow = 10.0;   // 최근 이만큼(초)의 변화를 본다
+const double kChangeMinSeconds = 5.0;  // 이보다 적게 모았으면 추천하지 않는다
 // 실시간에서 GPU 결과를 기다리는 최대 시간 (초). GPU가 한가하면 이 안에 끝나 지연이 늘지 않고,
 // RIFE가 GPU를 쓰고 있으면 기다리지 않고 다음 화면에서 다시 확인한다.
 const double kQuickWait = 0.002;
@@ -228,6 +233,10 @@ void FrameGen::EnsureFrames(UINT fullW, UINT fullH, UINT rx, UINT ry, UINT rw, U
     m_flowSets.reserve(8);  // 포인터가 바뀌지 않게 미리 잡아 둔다 (칸 크기는 3가지뿐)
     m_evalFlowSets.clear();
     m_evalFlowSets.reserve(8);
+    m_change.clear();
+    m_changeW = m_changeH = 0;
+    m_changeSeconds = 0;
+    m_changeTime = -1;
 
     for (int i = 0; i < kLevels; i++) {
         m_lvlW[i] = std::max(1u, w >> i);
@@ -709,7 +718,7 @@ com_ptr<ID3D11Texture2D> FrameGen::QueueDuplicate(const Frame& a, const Frame& b
     return staging;
 }
 
-bool FrameGen::ReadDuplicate(ID3D11Texture2D* staging, bool block, bool& same)
+bool FrameGen::ReadDuplicate(ID3D11Texture2D* staging, bool block, bool& same, double time)
 {
     D3D11_TEXTURE2D_DESC td;
     staging->GetDesc(&td);
@@ -718,17 +727,120 @@ bool FrameGen::ReadDuplicate(ID3D11Texture2D* staging, bool block, bool& same)
     if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return false;
     check_hresult(hr);
     same = true;
-    for (UINT y = 0; y < td.Height && same; y++) {
+    float peak = 0;
+    for (UINT y = 0; y < td.Height; y++) {
         auto row = reinterpret_cast<const float*>(static_cast<const char*>(mapped.pData) + (size_t)y * mapped.RowPitch);
-        for (UINT x = 0; x < td.Width; x++) {
-            if (row[x] > kDuplicateMse) {
-                same = false;
-                break;
+        for (UINT x = 0; x < td.Width; x++) peak = std::max(peak, row[x]);
+    }
+    same = peak <= kDuplicateMse;
+    // 영역 추천: 새 게임 프레임이면 묶음마다 바뀌었는지를 최근 kChangeWindow초의 지수 평균으로 쌓는다.
+    if (time >= 0 && !same) {
+        if (m_changeW != (int)td.Width || m_changeH != (int)td.Height) {
+            m_changeW = (int)td.Width;
+            m_changeH = (int)td.Height;
+            m_change.assign((size_t)m_changeW * m_changeH, 0.0f);
+            m_changeTime = -1;
+            m_changeSeconds = 0;
+        }
+        const double dt = m_changeTime < 0 ? 0 : std::clamp(time - m_changeTime, 0.0, 0.25);
+        m_changeTime = time;
+        if (dt > 0) {
+            // 시간에 따라 가중치를 주므로 게임 fps와 상관없이 "바뀐 시간의 비율"이 된다.
+            const float a = (float)(1.0 - std::exp(-dt / kChangeWindow));
+            for (int y = 0; y < m_changeH; y++) {
+                auto row = reinterpret_cast<const float*>(static_cast<const char*>(mapped.pData) + (size_t)y * mapped.RowPitch);
+                for (int x = 0; x < m_changeW; x++) {
+                    float& c = m_change[(size_t)y * m_changeW + x];
+                    c += a * ((row[x] > kChangeMse ? 1.0f : 0.0f) - c);
+                }
             }
+            m_changeSeconds = std::min(kChangeWindow * 3, m_changeSeconds + dt);
         }
     }
     m_ctx->Unmap(staging, 0);
     return true;
+}
+
+std::vector<float> FrameGen::ChangeRates(int& w, int& h) const
+{
+    w = m_changeW;
+    h = m_changeH;
+    // 처음 몇 초는 0에서 출발한 평균이 덜 찼으므로 모은 시간만큼 키워 비율로 맞춘다.
+    const float fill = (float)(1.0 - std::exp(-std::min(m_changeSeconds, kChangeWindow * 3) / kChangeWindow));
+    std::vector<float> rate(m_change.size());
+    for (size_t i = 0; i < rate.size(); i++) rate[i] = fill > 0 ? m_change[i] / fill : 0;
+    return rate;
+}
+
+FrameGen::RegionAdvice FrameGen::RecommendRegion(float out[4]) const
+{
+    if (m_change.empty() || m_changeSeconds < kChangeMinSeconds) return REGION_NOT_ENOUGH;
+    int gw, gh;
+    const std::vector<float> rate = ChangeRates(gw, gh);
+    std::vector<float> sorted = rate;
+    std::sort(sorted.begin(), sorted.end());
+    const float high = sorted[std::min(sorted.size() - 1, sorted.size() * 95 / 100)];
+    if (high < 0.05f) return REGION_STILL;  // 거의 움직이지 않았다
+
+    // 자주 바뀐 칸(상위 5% 칸의 40% 이상)을 이웃끼리 묶고, 바뀐 양의 합이 가장 큰 덩어리를 고른다.
+    // 리듬게임이면 노트가 내려오는 건반, 다른 덩어리는 점수 글자나 배경 영상의 일부인 경우가 많다.
+    const float threshold = std::max(0.03f, high * 0.4f);
+    const int w = m_changeW, h = m_changeH;
+    // 자주 바뀐 칸이 화면의 60%를 넘으면 (시점이 움직이는 게임) 좁힐 곳이 없다.
+    const size_t busy = (size_t)std::count_if(rate.begin(), rate.end(), [&](float r) { return r >= threshold; });
+    if (busy >= rate.size() * 6 / 10) return REGION_EVERYWHERE;
+    std::vector<int> label((size_t)w * h, -1);
+    int bestLabel = -1;
+    float bestSum = 0;
+    int bestBox[4] = {};
+    int next = 0;
+    std::vector<int> stack;
+    for (int start = 0; start < w * h; start++) {
+        if (label[start] >= 0 || rate[start] < threshold) continue;
+        float sum = 0;
+        int box[4] = { w, h, -1, -1 };
+        stack.assign(1, start);
+        label[start] = next;
+        while (!stack.empty()) {
+            const int i = stack.back();
+            stack.pop_back();
+            const int x = i % w, y = i / w;
+            sum += rate[i];
+            box[0] = std::min(box[0], x);
+            box[1] = std::min(box[1], y);
+            box[2] = std::max(box[2], x);
+            box[3] = std::max(box[3], y);
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    const int nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    const int j = ny * w + nx;
+                    if (label[j] < 0 && rate[j] >= threshold) {
+                        label[j] = next;
+                        stack.push_back(j);
+                    }
+                }
+        }
+        if (sum > bestSum) {
+            bestSum = sum;
+            bestLabel = next;
+            std::copy(box, box + 4, bestBox);
+        }
+        next++;
+    }
+    if (bestLabel < 0) return REGION_STILL;
+
+    // 가장자리에서 들어오는 물체가 잘리지 않게 한 칸씩 넓힌다. 묶음 하나는 작업 영역의 8/kDuplicateLevel배 축소 영상의 8x8이다.
+    const double cell = 8.0 * (1 << kDuplicateLevel);
+    double x0 = std::max(0.0, (bestBox[0] - 1) * cell), y0 = std::max(0.0, (bestBox[1] - 1) * cell);
+    double x1 = std::min((double)m_w, (bestBox[2] + 2) * cell), y1 = std::min((double)m_h, (bestBox[3] + 2) * cell);
+    if ((x1 - x0) * (y1 - y0) >= 0.85 * m_w * m_h) return REGION_EVERYWHERE;
+    // 작업 영역 좌표를 게임 화면 전체의 비율로 바꾼다 (이미 영역을 지정했으면 그 안에서 더 좁힌다).
+    out[0] = (float)((m_regionX + x0) / m_fullW);
+    out[1] = (float)((m_regionY + y0) / m_fullH);
+    out[2] = (float)((x1 - x0) / m_fullW);
+    out[3] = (float)((y1 - y0) / m_fullH);
+    return REGION_OK;
 }
 
 bool FrameGen::IsDuplicate(const Frame& a, const Frame& b)
@@ -745,7 +857,7 @@ void FrameGen::ResolveIncoming(bool block)
     if (!m_incoming.waiting) return;
     bool same = false;
     if (m_incoming.staging) {
-        if (!ReadDuplicate(m_incoming.staging.get(), block, same)) return;
+        if (!ReadDuplicate(m_incoming.staging.get(), block, same, m_incoming.time)) return;
         RecycleStaging(std::move(m_incoming.staging));
     }
     m_incoming.waiting = false;
