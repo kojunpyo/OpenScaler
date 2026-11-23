@@ -11,14 +11,21 @@
 # 고정 배수(예: 144Hz에 60fps x2)에서 같은 장면이 두 번 나오는 것은 장면이 바뀐 것으로 세므로 이 숫자에 드러나지 않는다.
 import csv
 import datetime as dt
+import re
 import statistics
 import sys
+
+
+def parse_time(text):
+    # "2026-11-24 2:27:58.1234567"처럼 시가 한 자리이거나 소수점 아래가 7자리여도 읽는다
+    d, h, mi, sec, frac = re.match(r"\s*(\d+-\d+-\d+) (\d+):(\d+):(\d+)\.?(\d*)", text).groups()
+    return dt.datetime.strptime(f"{d} {int(h):02d}:{mi}:{sec}.{(frac + '000000')[:6]}", "%Y-%m-%d %H:%M:%S.%f")
 
 pm_path, marker_path = sys.argv[1], sys.argv[2]
 shift = dt.timedelta(hours=float(sys.argv[3]) if len(sys.argv) > 3 else 9)
 rows = list(csv.DictReader(open(pm_path, encoding="utf-8-sig", errors="replace")))
 for r in rows:
-    r["_t"] = dt.datetime.strptime(r["TimeInDateTime"].strip()[:26], "%Y-%m-%d %H:%M:%S.%f") - shift
+    r["_t"] = parse_time(r["TimeInDateTime"]) - shift
 
 marks = {}
 for line in open(marker_path, encoding="utf-8"):
