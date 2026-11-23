@@ -7,7 +7,7 @@
 #   markers.txt:    "구간이름 start,2026-11-23 12:00:00.000" / "구간이름 end,..." 줄 (측정 스크립트가 남긴 시작/끝 시각)
 #   시각 보정 시간: PresentMon이 적은 시각에서 뺄 시간. 이 PC에서는 9시간 앞선 시각이 적혀 기본값 9.
 #
-# 끊김은 "화면에 새 장면이 바뀐 간격(MsBetweenDisplayChange)이 1.5칸을 넘은 횟수"로, README "성능 평가 기준"과 같은 기준이다.
+# 끊김은 "화면에 새 장면이 바뀐 간격(MsBetweenDisplayChange)이 1.5칸을 넘은 횟수"로, README 6.1 "평가 기준"과 같은 기준이다.
 # 고정 배수(예: 144Hz에 60fps x2)에서 같은 장면이 두 번 나오는 것은 장면이 바뀐 것으로 세므로 이 숫자에 드러나지 않는다.
 import csv
 import datetime as dt

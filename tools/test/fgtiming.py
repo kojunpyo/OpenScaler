@@ -1,4 +1,4 @@
-# --fg-log 기록을 분석해 실시간 프레임 생성을 README의 "성능 평가 기준"으로 매긴다.
+# --fg-log 기록을 분석해 실시간 프레임 생성을 README 6.1 "평가 기준"으로 매긴다.
 # 사용법: python -I tools/test/fgtiming.py fg.csv
 #
 # 기록의 열: 시각, 표시 시점, 게임 프레임 수, 걸러 낸 중복 수, RIFE 합성 수, RIFE 대신 블록 매칭 수, 신경망 ms, 화면 속 게임 시각, RIFE 입력 높이,

@@ -1,4 +1,4 @@
-# --fg-gaptest 결과(fg_gaptest.csv)를 README의 "성능 평가 기준"으로 매긴다.
+# --fg-gaptest 결과(fg_gaptest.csv)를 README 6.1 "평가 기준"으로 매긴다.
 # 사용법: python -I tools/test/fgquality.py fg_gaptest.csv
 #
 # 오차 감소율: 프레임 생성이 없을 때(앞 게임 프레임을 그대로 보여 줄 때) 정답과의 오차(평균 제곱 오차) 중 몇 %를 없앴는지.
