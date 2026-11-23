@@ -42,7 +42,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 - `third_party/`: fsr(MIT), imgui(MIT), galmuri(OFL 1.1), onnxruntime 헤더(MIT)
 - `tools/make_icon.ps1`: 로고와 아이콘 생성
 - `tools/profile_info.py`: 학습 데이터 요약, 비교, 형식 검사 (CI가 `shared-profiles/`를 검사). 공유 방법은 `docs/sharing-profiles.md`
-- `tools/test/`: 수동 테스트 스크립트 (`demoform.ps1`: README 시연 화면용 창, `devicecheck.ps1`: 다른 기기에서 기록 모으기, `fgtiming.py`/`fgquality.py`: README 평가 기준으로 등급 매기기)
+- `tools/test/`: 수동 테스트 스크립트 (`pmcompare.py`: PresentMon 기록으로 다른 확대 프로그램과 비교, `demoform.ps1`: README 시연 화면용 창, `devicecheck.ps1`: 다른 기기에서 기록 모으기, `fgtiming.py`/`fgquality.py`: README 평가 기준으로 등급 매기기)
 
 렌더링 순서: 캡처 -> 보이는 클라이언트 영역 복사 -> 프레임 생성(켠 경우) -> Pass 1 업스케일 -> Pass 2 샤프닝 -> 비교 모드 -> 커서 -> Direct2D 상태 표시 -> Present.
 
@@ -63,6 +63,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
   2. 그 결과로 정할 개선 후보: RIFE 지연 줄이기(1.3.3에서 끊김은 없앴지만 추가 지연 44ms), 고정 UI와 조준점 깨짐(화면 지도의 고정 칸 보호), 정수배가 아닌 배수의 화면 간격, 장면 전환 감지, 게임별 학습과 RIFE 연결, 긴 간격에서 밝기가 바뀌는 글자 깨짐.
   3. README: 2026-11-23에 구성을 바꿨다 (설치와 사용법을 3장으로, 문제 해결 3.7, 알려진 한계 8장, 개발과 기여 9장, 성능 표는 현재 버전만). 남은 것: 시연 GIF를 더 넣을 곳(화면 확대 비교, 프레임 생성 실제 게임, 영역 추천 흐름, 빠른 시작, 움직임 시각화).
   4. 운영: 이슈/PR 템플릿, CONTRIBUTING.md.
+  5. Lossless Scaling 비교는 2026-11-23에 했다 (README 6.3, `docs/frame-generation-plan.md` "Lossless Scaling과 비교"). 부드러움은 PresentMon으로 쟀고, 화질 비교는 남았다. PresentMon은 관리자 권한이 필요하고 `-WindowStyle Hidden`으로 띄워야 스크립트가 창을 바꿀 수 있다.
 
 ## 사용 중인 단축키
 
