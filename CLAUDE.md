@@ -54,7 +54,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
   - 게임별 학습은 보간용과 외삽용을 따로 둔다 (`GameProfile::interp`, `extrap`, 프로필의 `x_` 값). RIFE는 학습되지 않는다.
   - DJMAX 테스트는 게임에 Enter 외의 입력을 보내지 않는다 (비정상 동작으로 보고 꺼질 수 있다). 사용자가 곡 선택 화면을 준비해 둔다.
   - 학습 데이터 공유 기준은 사용자가 확인했다: 공유 권장은 최근 채점 200회 이상, `shared-profiles` 파일 교체는 같은 방식의 "기준보다 +dB"가 0.2dB 넘게 높을 때 (`docs/sharing-profiles.md`).
-  - 확대 중에는 GPU 스케줄링 우선순위를 실시간(`D3DKMTSetProcessSchedulingPriorityClass` 5)으로 올린다 (`UpdateGpuPriority`). RIFE는 신경망이 GPU를 길게 써서 게임과 바탕화면을 밀어낼 수 있으므로 보통으로 둔다 (2026-11-23에 높음, 실시간도 재 봤지만 끊김이 줄지 않았고 실시간은 게임 화면이 빠졌다). 비교 측정은 `--no-gpu-priority`, `--rife-gpu-priority`.
+  - 확대 중에는 GPU 스케줄링 우선순위를 실시간(`D3DKMTSetProcessSchedulingPriorityClass` 5)으로 올린다 (`UpdateGpuPriority`). RIFE는 신경망이 GPU를 길게 써서 게임과 바탕화면을 밀어낼 수 있으므로 보통으로 둔다 (2026-11-23에 높음, 실시간도 재 봤지만 끊김이 줄지 않았고 실시간은 게임 화면이 빠졌다). GPU를 많이 쓰는 게임에서는 실시간이 게임 fps를 4~6% 낮추지만 확대 화면 끊김을 7분의 1로 줄여 그대로 둔다 (2026-11-23, 수직 동기화 끈 마인크래프트). 같은 게임에서 RIFE를 실시간으로 하면 끊김이 5분의 1이 되고 게임 fps는 7% 줄었지만, 60fps 게임에서는 효과가 없어 RIFE는 보통으로 둔다. 비교 측정은 `--no-gpu-priority`, `--rife-gpu-priority`.
   - 144Hz 끊김은 화면 기준(PresentMon, `tools/test/pmcompare.py`)으로 적는다. `--fg-log`의 끊김은 화면 합성에서 밀린 장면을 못 봐서 1.5~2배 적게 나온다.
   - 성능은 README 6.1 "평가 기준: 정확성, 즉각성"으로 매긴다 (`tools/test/fgtiming.py`, `fgquality.py`).
   - README는 `docs/`의 개발 문서를 링크하지 않는다. 사용자에게 필요한 내용은 README에 직접 쓰고, 개발 정보는 9장 "개발과 기여"에 둔다. 성능 표에는 현재 버전의 결과만 둔다. 프레임 생성에 "(실험)"을 달지 않는다 (외삽 방식만 실험 표시).
@@ -88,6 +88,7 @@ Alt+Shift + S(시작/중지), M(모드), I(정수배), Up/Down(샤프닝), C(비
 - 커서 속도 테스트는 Windows 마우스 속도를 잠시 바꾸므로 끝나면 원래 값을 확인한다.
 - 슬로모션 테스트는 `tools/test/slowmorun.ps1`로 실행한다. 단축키 시험에서 Alt+Shift+O가 슬로모션 재생 밖에서 눌리면 `build\OpenScaler.ini`의 값이 바뀌므로 끝나면 확인한다.
 - `--fg-log`로 잴 때는 OpenScaler가 끝날 때까지 화면을 계속 움직인다. 2026-11-23에 시점 돌리기를 먼저 멈춰, 끝 1~2초의 멈춘 화면이 "멈춤 14~24%, 게임 46~52fps"로 잡혔다 (실제는 0~4%, 59fps).
+- PresentMon은 `--timed`가 지나 기록을 마친 뒤에도 프로세스와 ETW 세션이 남는다. 측정이 끝나면 정리한다. 쌓이면 "error code 1450"으로 시작하지 못한다. 관리자 권한으로 `taskkill /f /im PresentMon.exe`, `logman query -ets`에 보이는 PM 세션을 `logman stop 이름 -ets`로 정리한다.
 - 캡처는 주사율을 넘지 못한다. 이 PC에서 창이 초당 4,608번 그려도 캡처는 60fps였다.
 - 지금 쓰는 PC는 GTX 1060, 60Hz, 125%와 100% 모니터 혼합이다. 프레임 생성은 다른 기기에서 테스트할 예정이라 이 PC의 성능은 제약으로 보지 않는다.
 - 실제 게임에서의 체감은 사용자만 확인할 수 있다. 확인하지 못한 것은 그렇게 말한다.
