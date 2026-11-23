@@ -238,6 +238,8 @@ static Clock::time_point g_osdUntil;  // 이 시각까지 상태를 표시한다
 static std::unique_ptr<FrameGen> g_frameGen;
 static std::future<std::unique_ptr<FrameGen>> g_frameGenLoading;
 static FILE* g_fgLog = nullptr;  // --fg-log: 화면마다 시점을 기록한다 (테스트용)
+static bool g_gpuPriorityAllowed = true;  // --no-gpu-priority: GPU 우선순위를 올리지 않는다 (비교 측정용)
+static int g_gpuPriorityClass = -1;       // 지금 설정한 D3DKMT 우선순위 등급
 
 // --fg-log: 화면마다 GPU 작업 전체(프레임 생성, 업스케일, 상태 표시)가 GPU에서 시작해 끝날 때까지 걸린 시간.
 // 게임이 GPU를 함께 쓰면 기다린 시간도 들어간다. 결과는 몇 화면 뒤에 나오므로 화면 번호와 함께 남긴다.
@@ -1550,6 +1552,23 @@ static void SlowMoRecordCapture(ScalingSession* s, double frameTime)
         SlowMoFail(L"녹화 중에 창 크기가 바뀌었어요.");
 }
 
+// 확대 중에는 GPU 스케줄링 우선순위를 "실시간"으로 올린다. 화면마다 할 일이 3ms 안팎으로 작은데,
+// 게임이 GPU를 많이 쓰는 순간과 겹치면 그 작업이 끝날 때까지 기다려 144Hz의 한 칸(6.9ms)을 넘기고 끊겼다.
+// 우선순위를 올리면 우리 작업이 먼저 돌아 DJMAX 144Hz 끊김이 분당 약 66번에서 28번으로 줄었고, 게임 fps는 그대로였다.
+// RIFE는 신경망이 GPU를 길게 쓰므로 게임과 바탕화면을 밀어내지 않도록 보통으로 둔다.
+static void UpdateGpuPriority()
+{
+    const bool rife = g_settings.frameGen && FgModeOf(g_settings) == FG_MODE_RIFE;
+    const int wanted = g_gpuPriorityAllowed && g_scaling && !rife ? 5 : 2;  // D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME : _NORMAL
+    if (wanted == g_gpuPriorityClass) return;
+    using SetClass = LONG(APIENTRY*)(HANDLE, int);
+    static const auto setClass =
+        reinterpret_cast<SetClass>(GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTSetProcessSchedulingPriorityClass"));
+    g_gpuPriorityClass = wanted;
+    if (setClass && setClass(GetCurrentProcess(), wanted) == 0)
+        printf("\n[GPU 우선순위] %s\n", wanted == 5 ? "실시간" : "보통");
+}
+
 static void RenderFrame()
 {
     auto s = g_scaling;
@@ -2226,6 +2245,7 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--fg-rife") SetFgMode(g_settings, FG_MODE_RIFE);
         else if (a == L"--fg-block") SetFgMode(g_settings, FG_MODE_BLOCK);
         else if (a == L"--fg-visualize") g_settings.fgVisualize = true;
+        else if (a == L"--no-gpu-priority") g_gpuPriorityAllowed = false;
         else if (a == L"--fg-log" && i + 1 < argc) _wfopen_s(&g_fgLog, argv[++i], L"w");
         else if (a == L"--slowmo-auto" && i + 1 < argc) slowMoAuto = _wtof(argv[++i]);
         else if (a == L"--region-edit") regionEditAuto = true;
@@ -2340,6 +2360,7 @@ int wmain(int argc, wchar_t** argv)
 
             if (duration > 0 && std::chrono::duration<double>(Clock::now() - startTime).count() > duration) break;
 
+            UpdateGpuPriority();
             if (g_scaling) {
                 if (!IsWindow(g_scaling->target)) {
                     StopScaling();
