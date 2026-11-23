@@ -124,7 +124,11 @@ static void LoadSettings()
         g_settings.fgPreset = preset == FG_PRESET_NO_MAP ? FG_PRESET_NO_MAP : FG_PRESET_AUTO;
     }
     g_settings.fgLearn = GetPrivateProfileIntW(kSettingsSection, L"FgLearn", g_settings.fgLearn, file) != 0;
-    g_settings.slowMoTargetFps = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"SlowMoTargetFps", g_settings.slowMoTargetFps, file), 30, 1000);
+    {
+        // 예전 키(SlowMoTargetFps)는 기본값 120이 저장돼 있어 읽지 않는다. 새 키의 기본값은 모니터 주사율이다.
+        const int fps = (int)GetPrivateProfileIntW(kSettingsSection, L"SlowMoHz", g_settings.slowMoTargetFps, file);
+        g_settings.slowMoTargetFps = fps <= 0 ? 0 : std::clamp(fps, 30, 1000);  // 0: 모니터 주사율
+    }
     g_settings.slowMoSeconds = std::clamp((int)GetPrivateProfileIntW(kSettingsSection, L"SlowMoSeconds", g_settings.slowMoSeconds, file), 1, 3);
 }
 
@@ -145,7 +149,8 @@ static void SaveSettings()
     WritePrivateProfileStringW(kSettingsSection, L"FgGenerator", std::to_wstring(g_settings.fgGenerator).c_str(), file);
     WritePrivateProfileStringW(kSettingsSection, L"FgPreset", std::to_wstring(g_settings.fgPreset).c_str(), file);
     WritePrivateProfileStringW(kSettingsSection, L"FgLearn", g_settings.fgLearn ? L"1" : L"0", file);
-    WritePrivateProfileStringW(kSettingsSection, L"SlowMoTargetFps", std::to_wstring(g_settings.slowMoTargetFps).c_str(), file);
+    WritePrivateProfileStringW(kSettingsSection, L"SlowMoHz", std::to_wstring(g_settings.slowMoTargetFps).c_str(), file);
+    WritePrivateProfileStringW(kSettingsSection, L"SlowMoTargetFps", nullptr, file);
     WritePrivateProfileStringW(kSettingsSection, L"SlowMoSeconds", std::to_wstring(g_settings.slowMoSeconds).c_str(), file);
 }
 
@@ -239,6 +244,7 @@ static std::unique_ptr<FrameGen> g_frameGen;
 static std::future<std::unique_ptr<FrameGen>> g_frameGenLoading;
 static FILE* g_fgLog = nullptr;  // --fg-log: 화면마다 시점을 기록한다 (테스트용)
 static bool g_gpuPriorityAllowed = true;  // --no-gpu-priority: GPU 우선순위를 올리지 않는다 (비교 측정용)
+static int g_rifeGpuClass = 2;            // --rife-gpu-priority N: RIFE일 때의 GPU 우선순위 (2 보통, 3 보통 이상, 4 높음, 5 실시간, 측정용)
 static int g_gpuPriorityClass = -1;       // 지금 설정한 D3DKMT 우선순위 등급
 
 // --fg-log: 화면마다 GPU 작업 전체(프레임 생성, 업스케일, 상태 표시)가 GPU에서 시작해 끝날 때까지 걸린 시간.
@@ -1382,7 +1388,7 @@ static void DrawOsd(ScalingSession* s)
         } else {
             const auto& frames = g_frameGen->SlowMoFrames();
             const auto& f = frames[g_slowMo.index];
-            const double slowdown = g_settings.slowMoTargetFps * g_slowMo.holdVsyncs / s->refreshHz;
+            const double slowdown = SlowMoFps(g_settings, s->refreshHz) * g_slowMo.holdVsyncs / s->refreshHz;
             wchar_t kind[64], generator[32];
             if (f.generated) swprintf_s(kind, L"생성 (게임 프레임 %d + %.2f)", f.real + 1, f.t);
             else swprintf_s(kind, L"게임 프레임 %d", f.real + 1);
@@ -1390,7 +1396,7 @@ static void DrawOsd(ScalingSession* s)
             else swprintf_s(generator, L"블록 매칭");
             swprintf_s(text, L"슬로모션 %.1f배 느리게  ·  %dHz 가정  ·  %d / %d  ·  %ls  ·  %ls%ls\n"
                              L"Alt+Shift+ Space 멈춤  ·  ←→ 한 장씩  ·  O 글자 끄기  ·  T 끝내기",
-                       slowdown, g_settings.slowMoTargetFps, g_slowMo.index + 1, (int)frames.size(), kind, generator, g_slowMo.paused ? L"  ·  멈춤" : L"");
+                       slowdown, SlowMoFps(g_settings, s->refreshHz), g_slowMo.index + 1, (int)frames.size(), kind, generator, g_slowMo.paused ? L"  ·  멈춤" : L"");
         }
         // 상태 표시가 함께 떠 있으면 그 아래에 놓는다.
         DrawLabel(s, text, left + margin, top + margin + (showStatus ? s->textFormat->GetFontSize() * 6.0f : 0.0f), false);
@@ -1474,7 +1480,7 @@ static void SlowMoStep(int direction)
 static void SlowMoUpdateBeforeCapture(ScalingSession* s)
 {
     if (g_slowMo.state != SLOWMO_WAITING || !g_frameGen || !s->srcTex || NowSeconds() < g_slowMo.startAt) return;
-    const uint64_t bytes = uint64_t(s->srcW) * s->srcH * 4 * g_settings.slowMoTargetFps * g_settings.slowMoSeconds;
+    const uint64_t bytes = uint64_t(s->srcW) * s->srcH * 4 * SlowMoFps(g_settings, s->refreshHz) * g_settings.slowMoSeconds;
     if (bytes > kSlowMoMaxBytes) {
         SlowMoFail(L"프레임을 담을 메모리가 모자라요. 녹화 길이나 목표 fps를 줄여 주세요.");
         return;
@@ -1559,14 +1565,15 @@ static void SlowMoRecordCapture(ScalingSession* s, double frameTime)
 static void UpdateGpuPriority()
 {
     const bool rife = g_settings.frameGen && FgModeOf(g_settings) == FG_MODE_RIFE;
-    const int wanted = g_gpuPriorityAllowed && g_scaling && !rife ? 5 : 2;  // D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME : _NORMAL
+    // D3DKMT_SCHEDULINGPRIORITYCLASS: 2 보통, 5 실시간
+    const int wanted = !g_gpuPriorityAllowed || !g_scaling ? 2 : rife ? g_rifeGpuClass : 5;
     if (wanted == g_gpuPriorityClass) return;
     using SetClass = LONG(APIENTRY*)(HANDLE, int);
     static const auto setClass =
         reinterpret_cast<SetClass>(GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTSetProcessSchedulingPriorityClass"));
     g_gpuPriorityClass = wanted;
     if (setClass && setClass(GetCurrentProcess(), wanted) == 0)
-        printf("\n[GPU 우선순위] %s\n", wanted == 5 ? "실시간" : "보통");
+        printf("\n[GPU 우선순위] %d (2 보통, 5 실시간)\n", wanted);
 }
 
 static void RenderFrame()
@@ -1632,7 +1639,7 @@ static void RenderFrame()
     if (g_slowMo.state == SLOWMO_RECORDING &&
         (g_frameGen->SlowMoSpan() >= g_settings.slowMoSeconds || g_frameGen->SlowMoFull() ||
          NowSeconds() - g_slowMo.recordStart > g_settings.slowMoSeconds + 1.5)) {
-        if (g_frameGen->SlowMoStartGenerating(g_settings.slowMoTargetFps, g_settings.slowMoTargetFps * g_settings.slowMoSeconds))
+        if (g_frameGen->SlowMoStartGenerating(SlowMoFps(g_settings, s->refreshHz), SlowMoFps(g_settings, s->refreshHz) * g_settings.slowMoSeconds))
             g_slowMo.state = SLOWMO_GENERATING;
         else SlowMoFail(L"화면이 움직이지 않아 만들 프레임이 없어요.");
     }
@@ -1691,7 +1698,7 @@ static void RenderFrame()
                     }
                     g_slowMo.index = g_slowMo.vsyncs = g_slowMo.loopWait = 0;
                     // 주사율이 목표 fps보다 높으면 한 장을 더 오래 보여 줘 실제 시간보다 빨라지지 않게 한다.
-                    g_slowMo.holdVsyncs = std::max(1, (int)std::ceil(s->refreshHz / g_settings.slowMoTargetFps - 0.01));
+                    g_slowMo.holdVsyncs = std::max(1, (int)std::ceil(s->refreshHz / SlowMoFps(g_settings, s->refreshHz) - 0.01));
                     g_slowMo.state = SLOWMO_PLAYING;
                     SlowMoSetPlaybackKeys(true);
                     printf("\n[슬로모션] 게임 프레임 %d장으로 %d장을 만들었습니다.\n", g_frameGen->SlowMoRealCount(), (int)g_frameGen->SlowMoFrames().size());
@@ -2246,6 +2253,7 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--fg-block") SetFgMode(g_settings, FG_MODE_BLOCK);
         else if (a == L"--fg-visualize") g_settings.fgVisualize = true;
         else if (a == L"--no-gpu-priority") g_gpuPriorityAllowed = false;
+        else if (a == L"--rife-gpu-priority" && i + 1 < argc) g_rifeGpuClass = std::clamp(_wtoi(argv[++i]), 0, 5);
         else if (a == L"--fg-log" && i + 1 < argc) _wfopen_s(&g_fgLog, argv[++i], L"w");
         else if (a == L"--slowmo-auto" && i + 1 < argc) slowMoAuto = _wtof(argv[++i]);
         else if (a == L"--region-edit") regionEditAuto = true;
@@ -2264,7 +2272,7 @@ int wmain(int argc, wchar_t** argv)
                 std::copy(r, r + 4, g_fgRegionOverride);
             }
         }
-        else if (a == L"--slowmo-target" && i + 1 < argc) g_settings.slowMoTargetFps = std::clamp(_wtoi(argv[++i]), 30, 1000);
+        else if (a == L"--slowmo-target" && i + 1 < argc) { const int fps = _wtoi(argv[++i]); g_settings.slowMoTargetFps = fps <= 0 ? 0 : std::clamp(fps, 30, 1000); }
         else if (a == L"--slowmo-seconds" && i + 1 < argc) g_settings.slowMoSeconds = std::clamp(_wtoi(argv[++i]), 1, 3);
         else if (a == L"--slowmo-dump" && i + 1 < argc) g_slowMo.dumpDir = argv[++i];
     }

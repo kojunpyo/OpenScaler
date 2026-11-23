@@ -968,15 +968,19 @@ void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
     // 슬로모션 테스트
     BeginBox("##slowmo", "슬로모션 테스트", kGrayPalette);
     Description(kSlowMoDesc);
-    static const char* const kSlowMoFpsNames[] = { "120Hz", "180Hz", "240Hz" };
-    int slowMoFpsIndex = std::clamp(s.slowMoTargetFps / 60 - 2, 0, 2);
+    static const char* const kSlowMoFpsNames[] = { "모니터 주사율", "120Hz", "144Hz", "180Hz", "240Hz" };
+    static const int kSlowMoFpsValues[] = { 0, 120, 144, 180, 240 };
+    int slowMoFpsIndex = 0;
+    for (int i = 0; i < IM_ARRAYSIZE(kSlowMoFpsValues); i++)
+        if (kSlowMoFpsValues[i] == s.slowMoTargetFps) slowMoFpsIndex = i;
     RowLabel("주사율");
     LeaveRoomForHelp();
     if (ImGui::Combo("##slowmofps", &slowMoFpsIndex, kSlowMoFpsNames, IM_ARRAYSIZE(kSlowMoFpsNames))) {
-        s.slowMoTargetFps = (slowMoFpsIndex + 2) * 60;
+        s.slowMoTargetFps = kSlowMoFpsValues[slowMoFpsIndex];
         changed = true;
     }
-    HelpMarker("몇 Hz 모니터에서 보일 장면을 만들지 정해요. 게임 프레임 사이를 그만큼 채워요.");
+    HelpMarker("몇 Hz 모니터에서 보일 장면을 만들지 정해요. 게임 프레임 사이를 그만큼 채워요.\n"
+               "모니터 주사율이 120Hz보다 낮으면 120Hz로 만들어요.");
     static const char* const kSlowMoSecondNames[] = { "1초", "2초", "3초" };
     int slowMoSecondIndex = std::clamp(s.slowMoSeconds - 1, 0, 2);
     RowLabel("녹화 길이");
@@ -989,7 +993,7 @@ void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
                "느린 GPU에서도 모든 장면을 만들 수 있지만, 실제 지연과 끊김은 이 테스트로 확인할 수 없어요.");
     {
         char slowMoText[96];
-        const int frames = s.slowMoTargetFps * s.slowMoSeconds;
+        const int frames = SlowMoFps(s, status.refreshHz) * s.slowMoSeconds;
         switch (status.slowMoState) {
         case SLOWMO_WAITING: snprintf(slowMoText, sizeof(slowMoText), "%s", kSlowMoWaiting); break;
         case SLOWMO_RECORDING: snprintf(slowMoText, sizeof(slowMoText), "%s", kSlowMoRecording); break;

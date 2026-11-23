@@ -3,6 +3,7 @@
 // main.cpp(캡처/렌더링)와 gui.cpp(설정 창)가 함께 쓰는 설정과 기능
 
 #include <windows.h>
+#include <algorithm>
 #include <string>
 
 struct GameProfile;
@@ -32,9 +33,15 @@ struct Settings {
     bool fgLearn = true;             // 게임별 학습
     bool fgVisualize = false;        // 움직임을 색으로 표시 (발표용, 저장하지 않는다)
 
-    int slowMoTargetFps = 120;       // 슬로모션 테스트에서 가정하는 출력 fps
+    int slowMoTargetFps = 0;         // 슬로모션 테스트에서 가정하는 출력 fps. 0이면 모니터 주사율 (SlowMoFps)
     int slowMoSeconds = 1;           // 슬로모션 테스트의 녹화 길이 (초)
 };
+
+// 슬로모션 테스트가 만들 출력 fps. 0(모니터 주사율)이면 주사율을 쓰되, 60Hz 모니터에서도 고주사율 화면을 볼 수 있게 120 아래로는 내리지 않는다.
+inline int SlowMoFps(const Settings& s, double refreshHz)
+{
+    return s.slowMoTargetFps > 0 ? s.slowMoTargetFps : std::max(120, (int)(refreshHz + 0.5));
+}
 
 // 설정 창의 "방식": 생성기와 보간/외삽을 하나로 묶어 고르게 한다. 외삽은 블록 매칭으로만 만든다.
 enum FgMode { FG_MODE_BLOCK, FG_MODE_RIFE, FG_MODE_EXTRAPOLATE, FG_MODE_COUNT };
