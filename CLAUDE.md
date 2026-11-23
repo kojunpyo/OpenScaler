@@ -55,13 +55,14 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
   - DJMAX 테스트는 게임에 Enter 외의 입력을 보내지 않는다 (비정상 동작으로 보고 꺼질 수 있다). 사용자가 곡 선택 화면을 준비해 둔다.
   - 학습 데이터 공유 기준은 사용자가 확인했다: 공유 권장은 최근 채점 200회 이상, `shared-profiles` 파일 교체는 같은 방식의 "기준보다 +dB"가 0.2dB 넘게 높을 때 (`docs/sharing-profiles.md`).
   - 확대 중에는 GPU 스케줄링 우선순위를 실시간(`D3DKMTSetProcessSchedulingPriorityClass` 5)으로 올린다 (`UpdateGpuPriority`). RIFE는 신경망이 GPU를 길게 써서 게임과 바탕화면을 밀어낼 수 있으므로 보통으로 둔다 (2026-11-23에 높음, 실시간도 재 봤지만 끊김이 줄지 않았고 실시간은 게임 화면이 빠졌다). GPU를 많이 쓰는 게임에서는 실시간이 게임 fps를 4~6% 낮추지만 확대 화면 끊김을 7분의 1로 줄여 그대로 둔다 (2026-11-23, 수직 동기화 끈 마인크래프트). 같은 게임에서 RIFE를 실시간으로 하면 끊김이 5분의 1이 되고 게임 fps는 7% 줄었지만, 60fps 게임에서는 효과가 없어 RIFE는 보통으로 둔다. 비교 측정은 `--no-gpu-priority`, `--rife-gpu-priority`.
+  - RIFE의 144Hz 끊김은 실행 환경(GTX 1060)의 한계로 README 8장에 적고 더 고치지 않는다 (2026-11-23, 사용자 결정).
   - 144Hz 끊김은 화면 기준(PresentMon, `tools/test/pmcompare.py`)으로 적는다. `--fg-log`의 끊김은 화면 합성에서 밀린 장면을 못 봐서 1.5~2배 적게 나온다.
   - 성능은 README 6.1 "평가 기준: 정확성, 즉각성"으로 매긴다 (`tools/test/fgtiming.py`, `fgquality.py`).
   - README는 `docs/`의 개발 문서를 링크하지 않는다. 사용자에게 필요한 내용은 README에 직접 쓰고, 개발 정보는 9장 "개발과 기여"에 둔다. 성능 표에는 현재 버전의 결과만 둔다. 프레임 생성에 "(실험)"을 달지 않는다 (외삽 방식만 실험 표시).
   - 확대를 시작하면 메뉴를 열고 "프레임 생성 영역을 지정할까요?" 팝업을 띄운다 (문구는 사용자가 정함, `kAskRegionTitle`). 설정 창을 쓸 때만이고 `--no-gui` 측정과 시험에서는 띄우지 않는다 (`--region-wizard`로 강제).
 - 다음 작업 (자세한 내용과 측정 기록은 `docs/frame-generation-plan.md`):
   1. 고주사율 확인 결과(`docs/frame-generation-plan.md` "고주사율 확인")에서 남은 것: 화면이 큰 게임(DJMAX 1280x720)은 144Hz에서 화면 전체 프레임 생성이 끊긴다. 1.3.9에서 같은 곡 번갈아 재기로 분당 109~152번 -> 35~92번, 건반 영역 113번 -> 25번 (`docs/frame-generation-plan.md` "144Hz GPU 시간 줄이기"). 남은 끊김은 게임의 GPU 작업과 겹치는 순간에 몰려 났다. 1.3.10에서 GPU 스케줄링 우선순위를 실시간으로 올려 분당 45~108번 -> 10~49번, 건반 영역 0번 ("GPU 스케줄링 우선순위"). 1.3.5에서 영역 추천 버튼을 만들었다 (`FrameGen::RecommendRegion`, 시험 `--region-recommend 초`). 움직임 찾기를 두 화면에 나누는 방법은 효과가 없었다.
-  2. 그 결과로 정할 개선 후보: RIFE 지연 줄이기(1.3.3에서 끊김은 없앴지만 추가 지연 44ms), 고정 UI와 조준점 깨짐(화면 지도의 고정 칸 보호), 정수배가 아닌 배수의 화면 간격, 장면 전환 감지, 게임별 학습과 RIFE 연결, 긴 간격에서 밝기가 바뀌는 글자 깨짐.
+  2. 그 결과로 정할 개선 후보: 고정 UI와 조준점 깨짐(화면 지도의 고정 칸 보호), 정수배가 아닌 배수의 화면 간격, 장면 전환 감지, 게임별 학습과 RIFE 연결, 긴 간격에서 밝기가 바뀌는 글자 깨짐.
   3. README: 2026-11-23에 구성을 바꿨다 (설치와 사용법을 3장으로, 문제 해결 3.7, 알려진 한계 8장, 개발과 기여 9장, 성능 표는 현재 버전만). 2026-11-23에 시연 화면을 0.5배속으로, 6장을 "6.1 평가 기준 / 6.2 성능 평가(OpenScaler, Lossless Scaling 비교)"로 바꾸고, 4.2에 프레임 생성 설명 그림(`docs/fg_between.png`), 4.3에 확대 비교 그림(`docs/upscale_compare.png`)을 넣었다. 남은 그림 후보: 영역 추천 흐름, 빠른 시작, 움직임 시각화, 설정 창.
   4. 운영: 이슈/PR 템플릿, CONTRIBUTING.md.
   5. Lossless Scaling 비교는 2026-11-23에 했다 (README 6.3, `docs/frame-generation-plan.md` "Lossless Scaling과 비교"). 부드러움은 PresentMon으로 쟀다. 화질은 OBS와 Lossless Scaling을 모두 관리자 권한으로 실행하고 OBS 게임 캡처로 녹화해 정답 프레임과 비교했다 (DJMAX: OpenScaler 블록 90%, LS 85% / 마인크래프트: LS 87%, RIFE 81%, 블록 46%). Lossless Scaling은 캡처 API가 DXGI면 출력을 화면 캡처에서 뺀다. PresentMon은 관리자 권한이 필요하고 `-WindowStyle Hidden`으로 띄워야 스크립트가 창을 바꿀 수 있다.
