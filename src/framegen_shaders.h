@@ -144,20 +144,30 @@ void CSMatch(uint3 id : SV_DispatchThreadID)
         int2 pc = clamp(srcC / prevCellSrc, int2(0, 0), prevGridSize - 1);
         pred = round(matchPrev.Load(int3(pc, 0)).xy / levelScale);
 
-        [loop] for (int y = -1; y <= 1; y++)
+        // 굵은 단계의 주변 9칸은 같은 벡터인 경우가 많다. 이미 본 벡터는 오차도 같아 결과를 바꾸지 못하므로 건너뛴다.
+        int2 tried[11];
+        [unroll] for (int k = 0; k < 11; k++)
         {
-            [loop] for (int x = -1; x <= 1; x++)
+            int2 v;
+            if (k < 9)
             {
-                int2 q = clamp(pc + int2(x, y), int2(0, 0), prevGridSize - 1);
-                TRY_CANDIDATE(int2(round(matchPrev.Load(int3(q, 0)).xy / levelScale)));
+                int2 q = clamp(pc + int2(k % 3 - 1, k / 3 - 1), int2(0, 0), prevGridSize - 1);
+                v = int2(round(matchPrev.Load(int3(q, 0)).xy / levelScale));
             }
-        }
-        TRY_CANDIDATE(int2(0, 0));
-
-        if (temporalCell > 0)
-        {
-            int2 tc = clamp(srcC / temporalCell, int2(0, 0), temporalGrid - 1);
-            TRY_CANDIDATE(int2(round(matchTemporal.Load(int3(tc, 0)).xy / levelScale)));
+            else if (k == 9)
+            {
+                v = int2(0, 0);
+            }
+            else
+            {
+                if (temporalCell <= 0) break;
+                int2 tc = clamp(srcC / temporalCell, int2(0, 0), temporalGrid - 1);
+                v = int2(round(matchTemporal.Load(int3(tc, 0)).xy / levelScale));
+            }
+            bool seen = false;
+            [unroll] for (int j = 0; j < k; j++) seen = seen || all(tried[j] == v);
+            tried[k] = v;
+            [branch] if (!seen) TRY_CANDIDATE(v);
         }
         if (hasHint)
         {
@@ -399,30 +409,64 @@ void CSCompose(uint3 id : SV_DispatchThreadID)
     float3 sum = 0;
     float weightSum = 0;
     const float tol2 = max(blendTol * blendTol, 1e-6);
-    [loop] for (int i = 0; i < 5; i++)
+    // 주변 네 칸의 벡터는 같은 경우가 많다 (멈춘 곳, 함께 움직이는 배경). 같은 벡터는 결과도 같으므로
+    // 앞에서 계산한 색과 오차를 그대로 쓴다. 결과는 매번 계산할 때와 같고 텍스처 읽기만 준다.
+    float2 vs[4];
+    float3 cs[4];
+    float es[4];   // Resolve를 거친 오차
+    float pes[4];  // PatchError 값 (움직임 없음 후보가 다시 쓴다)
+    [unroll] for (int i = 0; i < 4; i++)
     {
-        float2 v;
-        float dist;
-        float err;
-        if (i < 4)
+        int2 o = int2(i & 1, i >> 1);
+        int2 q = clamp(base + o, int2(0, 0), gridSize - 1);
+        float2 v = composeMotion.Load(int3(q, 0)).xy;
+        float2 w = lerp(1.0 - f, f, float2(o));
+        float dist = w.x * w.y + 0.02;
+        bool same = false;
+        float3 c = 0;
+        float err = 0, pe = 0;
+        [unroll] for (int j = 0; j < i; j++)
         {
-            int2 o = int2(i & 1, i >> 1);
-            int2 q = clamp(base + o, int2(0, 0), gridSize - 1);
-            v = composeMotion.Load(int3(q, 0)).xy;
-            float2 w = lerp(1.0 - f, f, float2(o));
-            dist = w.x * w.y + 0.02;
-            err = PatchError(p, v);
+            if (!same && all(vs[j] == v))
+            {
+                same = true;
+                c = cs[j];
+                err = es[j];
+                pe = pes[j];
+            }
         }
-        else
+        [branch] if (!same)
         {
-            v = float2(0, 0);
-            dist = 0.25;
-            err = PatchError(p, v) * 0.7;
+            pe = PatchError(p, v);
+            err = pe;
+            c = Resolve(p, v, err);
         }
-        float3 c = Resolve(p, v, err);
-        float w = dist * exp(-err * err / tol2);
-        sum += c * w;
-        weightSum += w;
+        vs[i] = v;
+        cs[i] = c;
+        es[i] = err;
+        pes[i] = pe;
+        float wgt = dist * exp(-err * err / tol2);
+        sum += c * wgt;
+        weightSum += wgt;
+    }
+    {
+        // 움직임 없음 후보
+        bool same = false;
+        float pe = 0;
+        [unroll] for (int j = 0; j < 4; j++)
+        {
+            if (!same && all(vs[j] == float2(0, 0)))
+            {
+                same = true;
+                pe = pes[j];
+            }
+        }
+        [branch] if (!same) pe = PatchError(p, float2(0, 0));
+        float err = pe * 0.7;
+        float3 c = Resolve(p, float2(0, 0), err);
+        float wgt = 0.25 * exp(-err * err / tol2);
+        sum += c * wgt;
+        weightSum += wgt;
     }
 
     float3 result;

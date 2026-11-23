@@ -623,13 +623,13 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
     printf("진짜 프레임 %zu장 (%dx%d)\n%-6s %-6s %8s %9s %9s %10s %9s\n", frames.size(), w, h, "간격", "시점", "멈춤", "블렌딩", "블록",
            "긴 간격 설정", "RIFE");
     std::ofstream csv(outDir + L"\\fg_gaptest.csv");
-    csv << "gap,t,samples,hold_db,blend_db,block_db,block_longgap_db,rife_db,frame_ms\n";
+    csv << "gap,t,samples,hold_db,blend_db,block_db,block_longgap_db,rife_db,frame_ms,block_estimate_ms,block_synth_ms\n";
     bool rifeOk = true;
     const struct { int gap, part; } cases[] = { { 2, 1 }, { 3, 1 }, { 4, 2 }, { 4, 1 }, { 6, 3 }, { 8, 4 } };
     for (auto& c : cases) {
         const float t = (float)c.part / c.gap;
         const FgParams longGap = FrameGen::IsLongGap(kStep * c.gap, kStep) ? FrameGen::ForLongGap(defaults) : defaults;
-        double hold = 0, blend = 0, block = 0, blockLong = 0, rife = 0;
+        double hold = 0, blend = 0, block = 0, blockLong = 0, rife = 0, estMs = 0, synMs = 0;  // 블록 매칭의 GPU 시간도 남긴다
         int n = 0, rifeN = 0;
         const int sampleAt = (int)frames.size() / 2;
         for (int k = 0; k + c.gap < (int)frames.size(); k += 2) {
@@ -642,7 +642,10 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
             hold += fg.TestHoldPsnr(1, 3);
             blend += fg.TestBlendPsnr(1, 2, 3, t);
             if (save) SaveBmp(name + L"blend.bmp", fg.TestReadOutput(), w, h);
-            block += fg.TestSynthPsnr(1, 2, 3, t, defaults, false, kStep * c.gap).psnr;
+            const auto blockResult = fg.TestSynthPsnr(1, 2, 3, t, defaults, false, kStep * c.gap);
+            block += blockResult.psnr;
+            estMs += blockResult.estimateMs;
+            synMs += blockResult.synthMs;
             if (save) SaveBmp(name + L"block.bmp", fg.TestReadOutput(), w, h);
             blockLong += fg.TestSynthPsnr(1, 2, 3, t, longGap, false, kStep * c.gap).psnr;
             if (save) SaveBmp(name + L"block_longgap.bmp", fg.TestReadOutput(), w, h);
@@ -665,10 +668,11 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
         }
         const double k = 1.0 / n;
         const double rk = rifeN ? 1.0 / rifeN : 0;
-        printf("%-6d %-6.2f %8.2f %9.2f %9.2f %10.2f %9.2f\n", c.gap, t, hold * k, blend * k, block * k, blockLong * k, rife * rk);
+        printf("%-6d %-6.2f %8.2f %9.2f %9.2f %10.2f %9.2f  (블록 매칭 GPU: 움직임 찾기 %.2f, 합성 %.2f ms)\n", c.gap, t, hold * k, blend * k,
+               block * k, blockLong * k, rife * rk, estMs * k, synMs * k);
         fflush(stdout);
         csv << c.gap << "," << t << "," << n << "," << hold * k << "," << blend * k << "," << block * k << "," << blockLong * k << ","
-            << rife * rk << "," << kStep * 1000 << "\n";
+            << rife * rk << "," << kStep * 1000 << "," << estMs * k << "," << synMs * k << "\n";
     }
     // 학습 재현: 앞 절반의 프레임으로 실제 프로그램과 같은 순서로 학습하고, 보지 않은 뒤 절반에서 기본값과 비교한다.
     // 다른 화면이 섞인 경우: 게임 프레임과 계산으로 만든 장면을 24회씩 번갈아 채점한다 (메뉴, 결과 화면 대신).
