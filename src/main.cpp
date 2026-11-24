@@ -457,6 +457,8 @@ static bool g_overlayMenu = false;
 // 확대를 시작하면 묻는 "프레임 생성 영역을 지정할까요?"와 그 뒤의 추천 영역 계산
 enum RegionWizard { WIZARD_NONE, WIZARD_ASK, WIZARD_COMPUTING, WIZARD_EVERYWHERE };
 static int g_wizard = WIZARD_NONE;
+static bool g_wizardReturnMenu = false;   // 팝업에서 "예"를 눌렀으면 영역 지정이 끝난 뒤 메뉴를 다시 연다
+static void SetOverlayMenu(bool open);
 static const double kWizardSeconds = 10.0;  // "예"를 누른 뒤 이만큼 모아 추천한다
 static bool g_autoOverlay = false;  // 확대를 시작하면 메뉴와 팝업을 띄운다 (설정 창을 쓸 때. --no-gui 측정과 시험에서는 끈다)
 static bool g_overlayInteractive = false;  // 지금 확대 화면 창이 마우스를 받는지 (메뉴나 버튼이 있는 팝업이 떠 있을 때)
@@ -775,6 +777,11 @@ static void RegionEditEnd(bool save)
     g_region.hwnd = nullptr;
     g_region.drag = DRAG_NONE;
     DestroyWindow(hwnd);
+    // 확대 시작 팝업에서 이어진 영역 지정이면, 저장하든 취소하든 끝난 뒤 메뉴를 다시 연다.
+    if (g_wizardReturnMenu) {
+        g_wizardReturnMenu = false;
+        SetOverlayMenu(true);
+    }
 }
 
 static void RegionClear()
@@ -1025,6 +1032,7 @@ static void SetWizard(int state)
 static void StopScaling()
 {
     if (!g_scaling) return;
+    g_wizardReturnMenu = false;
     SetOverlayMenu(false);
     SetWizard(WIZARD_NONE);
     if (g_scaling->cursorMapped) {
@@ -1856,7 +1864,8 @@ static void RenderFrame()
                         AppSettingsChanged();
                     }
                     if (g_frameGen) g_frameGen->ResetChange();
-                    g_overlayMenu = false;  // 메뉴를 숨겨 게임 화면이 보이고 마우스도 게임으로 가게 한다
+                    g_overlayMenu = false;  // 계산하는 동안은 메뉴를 숨겨 게임 화면이 보이고 마우스도 게임으로 가게 한다
+                    g_wizardReturnMenu = true;  // 영역 지정이 끝나면 메뉴를 다시 연다
                     SetWizard(WIZARD_COMPUTING);
                     break;
                 case OVERLAY_ACTION_NO: SetWizard(WIZARD_NONE); break;
@@ -1864,7 +1873,13 @@ static void RenderFrame()
                     SetWizard(WIZARD_NONE);
                     RegionEditBegin();
                     break;
-                case OVERLAY_ACTION_DISMISS: SetWizard(WIZARD_NONE); break;
+                case OVERLAY_ACTION_DISMISS:
+                    SetWizard(WIZARD_NONE);
+                    if (g_wizardReturnMenu) {  // "좁힐 곳을 찾지 못했어요"에서 닫기: 메뉴로 돌아간다
+                        g_wizardReturnMenu = false;
+                        SetOverlayMenu(true);
+                    }
+                    break;
                 }
             }
         }
@@ -1981,6 +1996,7 @@ static bool HandleHotkey(int id)
     case HK_MENU:
         if (g_wizard == WIZARD_COMPUTING) {
             SetWizard(WIZARD_NONE);  // 추천 영역 계산을 그만두고 메뉴를 연다
+            g_wizardReturnMenu = false;
             SetOverlayMenu(true);
         } else {
             SetOverlayMenu(!g_overlayMenu);
