@@ -2,7 +2,8 @@
 //
 // Dear ImGui로 대상 창 선택, 시작/중지, 업스케일 설정, 상태를 한 화면에 보여 준다.
 // 디자인: 흰 바탕 + 하늘색 픽셀 스타일 (두꺼운 테두리, 각진 모서리, 픽셀 글꼴 Neo둥근모 Pro).
-// 픽셀 글꼴은 16px 기준이다. 사용자 요청으로 본문은 14px x P, 덜 중요한 글은 12px x P로 조금 작게 그린다 (P는 보통 2).
+// 픽셀 글꼴은 16px 기준이다. 사용자 요청으로 본문은 14px x P, 덜 중요한 글은 12px x P로 조금 작게 그린다.
+// P는 Windows 배율에 비례한다 (100%에서 4/3). 창 크기는 사용자가 정한 대로 100%에서 GitHub Desktop 창(약 960 x 660)쯤이다.
 // 캡처/렌더링과 같은 D3D11 디바이스를 쓰고, 메인 루프(main.cpp)에서 매 반복마다 GuiRender를 부른다.
 
 #include "gui.h"
@@ -42,7 +43,7 @@ bool g_open = false;
 bool g_minimized = false;
 float g_dpiScale = 1.0f;   // Windows 배율 (125% = 1.25)
 float g_pendingDpi = 0;    // 배율이 다른 모니터로 옮겨지면 다음 프레임에 글꼴과 크기를 다시 만든다
-int P = 2;                 // 픽셀 하나의 크기 (본문 글꼴 14px x P)
+float P = 2.0f;            // 픽셀 하나의 크기 (본문 글꼴 14px x P). 배율에 비례하는 실수
 Clock::time_point g_lastRender;
 
 ImFont* g_fontBody = nullptr;   // 본문, 옵션 이름, 버튼 (Neo둥근모 Pro 14px x P)
@@ -95,6 +96,8 @@ struct Palette {
     ImVec4 fillActive;
 };
 const Palette kSkyPalette = { kSky, kSkyDeep, kSkyText, kSkySoft, kSkyHover, kSkyMid, kSky, kSkyDeep };
+// 대상 창(시작하는 곳): 진한 하늘색 테두리에 옅은 하늘색 바탕. 바탕과 겹치지 않게 마우스를 올린 색은 한 단계 진하게.
+const Palette kTargetPalette = { kSkyDeep, kSkyDeep, kSkyText, kSkySoft, kSkyMid, kSkyMid, kSky, kSkyDeep };
 const Palette* g_pal = &kSkyPalette;
 
 // 지금부터 그리는 위젯에 색 묶음을 적용한다 (PopPalette로 되돌린다)
@@ -423,8 +426,8 @@ void SetupStyle()
     c[ImGuiCol_NavHighlight] = kSkyDeep;
 }
 
-// Windows 배율에 맞는 픽셀 크기: 100%~150%는 2배, 175% 이상은 3배
-int PixelScaleFor(float dpiScale) { return std::max(1, (int)std::lround(dpiScale * 1.6f)); }
+// Windows 배율에 맞는 픽셀 크기: 100%에서 4/3, 125%에서 5/3, 150%에서 2
+float PixelScaleFor(float dpiScale) { return dpiScale * 4.0f / 3.0f; }
 
 // 배율에 맞춰 픽셀 크기, 스타일, 글꼴, 로고를 다시 만든다.
 void ApplyScale(float dpiScale)
@@ -433,7 +436,7 @@ void ApplyScale(float dpiScale)
     P = PixelScaleFor(dpiScale);
     SetupStyle();
     SetupFonts();
-    LoadLogo(30 * P);
+    LoadLogo((int)std::lround(30 * P));
 }
 
 // ---------------------------------------------------------------------------
@@ -472,12 +475,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DPICHANGED: {
         // 픽셀 크기 P가 그대로면(예: 125% -> 100%) 창 크기도 그대로 두고 위치만 옮긴다.
         g_pendingDpi = HIWORD(wp) / 96.0f;
-        int newP = PixelScaleFor(g_pendingDpi);
+        const float newP = PixelScaleFor(g_pendingDpi);
         auto rc = reinterpret_cast<RECT*>(lp);
         RECT cur;
         GetWindowRect(hwnd, &cur);
-        int w = (cur.right - cur.left) * newP / P;
-        int h = (cur.bottom - cur.top) * newP / P;
+        int w = (int)std::lround((cur.right - cur.left) * newP / P);
+        int h = (int)std::lround((cur.bottom - cur.top) * newP / P);
         SetWindowPos(hwnd, nullptr, rc->left, rc->top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
         return 0;
     }
@@ -516,6 +519,16 @@ void HelpMarker(const char* text);
 float g_nextBoxMinHeight = 0;
 struct BoxFit { float top = 0, natural = 0, bottom = 0; };
 BoxFit g_lastBox;
+
+// 대상 창 상자: 옅은 하늘색 바탕과 진한 하늘색 테두리(굵기는 다른 구역과 같음)로 눈에 띄게 한다.
+// 안의 목록 칸과 버튼은 흰 바탕 그대로 두어 바탕에 묻히지 않게 한다.
+void BeginBox(const char* id, const char* title, const Palette& palette, const char* help);
+void BeginTargetBox(const char* id, const char* title)
+{
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, kSkyHover);
+    BeginBox(id, title, kTargetPalette, nullptr);
+    ImGui::PopStyleColor();
+}
 
 // help가 있으면 제목 옆에 (?)를 붙인다.
 void BeginBox(const char* id, const char* title, const Palette& palette, const char* help = nullptr)
@@ -1147,7 +1160,7 @@ void DrawUi()
     ImGui::Dummy(ImVec2(0, 1 * u));
 
     // 대상 창과 시작/중지
-    BeginBox("##target", "대상 창", kSkyPalette);
+    BeginTargetBox("##target", "대상 창");
     {
         const char* refreshLabel = "새로고침";
         float refreshWidth = ImGui::CalcTextSize(refreshLabel).x + ImGui::GetStyle().FramePadding.x * 2;
@@ -1183,7 +1196,7 @@ void DrawUi()
         ImVec2 p = ImGui::GetCursorScreenPos();
         float lineH = ImGui::GetTextLineHeight();
         DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)),
-                  Col(status.active ? kSkyDeep : kSkyMid));
+                  Col(status.active ? kSkyDeep : kSky));
         ImGui::Dummy(ImVec2(7 * u, lineH));
         ImGui::SameLine();
         if (status.active) {
@@ -1377,7 +1390,7 @@ void DrawOverlayUi(bool& keepOpen)
     ImGui::Dummy(ImVec2(0, 2 * u));
 
     // 확대 상태와 중지
-    BeginBox("##ovtarget", "확대 중", kSkyPalette);
+    BeginTargetBox("##ovtarget", "확대 중");
     if (status.active) {
         ImGui::Text("%u×%u > %u×%u", status.srcW, status.srcH, status.dstW, status.dstH);
         char fps[64];
@@ -1422,11 +1435,11 @@ bool GuiCreate(ID3D11Device* device, ID3D11DeviceContext* context)
                              100, 100, nullptr, nullptr, inst, nullptr);
     if (!g_hwnd) return false;
 
-    // 창 크기: 픽셀 단위 720 x 495 (배율 P를 곱한다). 대상 창 아래를 두 열로 나눈다.
+    // 창 크기: 픽셀 단위 720 x 484 (배율 P를 곱한다, 100%에서 960 x 645). 대상 창 아래를 두 열로 나눈다.
     UINT dpi = GetDpiForWindow(g_hwnd);
     g_dpiScale = dpi / 96.0f;
     P = PixelScaleFor(g_dpiScale);
-    RECT rc = { 0, 0, (LONG)(720 * P), (LONG)(495 * P) };
+    RECT rc = { 0, 0, (LONG)(720 * P), (LONG)(484 * P) };
     AdjustWindowRectExForDpi(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
 
     // 작업 표시줄을 뺀 화면 가운데에 놓고, 화면보다 크면 높이를 줄인다 (넘치는 내용은 스크롤)
@@ -1542,7 +1555,7 @@ int GuiOverlayRender(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11R
             // 설정 창 없이 실행했으면 (--no-gui) 글꼴을 여기서 만든다.
             g_device = device;
             g_ctx = context;
-            P = 2;
+            P = PixelScaleFor(GetDpiForSystem() / 96.0f);
             SetupFonts();
         }
         SetupStyle();
