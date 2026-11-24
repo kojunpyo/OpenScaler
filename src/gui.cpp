@@ -1,8 +1,8 @@
 // OpenScaler 설정 창
 //
 // Dear ImGui로 대상 창 선택, 시작/중지, 업스케일 설정, 상태를 한 화면에 보여 준다.
-// 디자인: 흰 바탕 + 연분홍 픽셀 스타일 (두꺼운 테두리, 각진 모서리, 픽셀 글꼴 Galmuri11 Bold).
-// 픽셀 글꼴은 12px 기준으로 그려졌으므로, 정수 배율 P(보통 2)로만 키워 픽셀이 뭉개지지 않게 한다.
+// 디자인: 흰 바탕 + 하늘색 픽셀 스타일 (두꺼운 테두리, 각진 모서리, 픽셀 글꼴 Neo둥근모 Pro).
+// 픽셀 글꼴은 16px 기준이다. 사용자 요청으로 본문은 14px x P, 덜 중요한 글은 12px x P로 조금 작게 그린다 (P는 보통 2).
 // 캡처/렌더링과 같은 D3D11 디바이스를 쓰고, 메인 루프(main.cpp)에서 매 반복마다 GuiRender를 부른다.
 
 #include "gui.h"
@@ -42,12 +42,12 @@ bool g_open = false;
 bool g_minimized = false;
 float g_dpiScale = 1.0f;   // Windows 배율 (125% = 1.25)
 float g_pendingDpi = 0;    // 배율이 다른 모니터로 옮겨지면 다음 프레임에 글꼴과 크기를 다시 만든다
-int P = 2;                 // 픽셀 하나의 크기 (글꼴 12px x P)
+int P = 2;                 // 픽셀 하나의 크기 (본문 글꼴 14px x P)
 Clock::time_point g_lastRender;
 
-ImFont* g_fontBody = nullptr;   // 옵션 이름, 버튼 (Galmuri11 Bold)
-ImFont* g_fontTitle = nullptr;  // 제목 (Galmuri11 Bold 2배)
-ImFont* g_fontThin = nullptr;   // 설명 (Galmuri11 Condensed)
+ImFont* g_fontBody = nullptr;   // 본문, 옵션 이름, 버튼 (Neo둥근모 Pro 14px x P)
+ImFont* g_fontTitle = nullptr;  // 제목 (28px x P)
+ImFont* g_fontThin = nullptr;   // 덜 중요한 글: 설명, 상태, (?)와 도움말 (12px x P)
 ComPtr<ID3D11ShaderResourceView> g_logo;
 int g_logoSize = 0;
 
@@ -66,20 +66,24 @@ ImFontAtlas* SharedAtlas()
     return g_atlas;
 }
 
-// 색상: 흰 바탕 + 연분홍
+// 색상: 흰 바탕 + 하늘색
 ImVec4 Rgb(int hex, float a = 1.0f)
 {
     return ImVec4(((hex >> 16) & 0xFF) / 255.0f, ((hex >> 8) & 0xFF) / 255.0f, (hex & 0xFF) / 255.0f, a);
 }
 const ImVec4 kWhite = Rgb(0xFFFFFF);
-const ImVec4 kPink = Rgb(0xF49AB8);       // 테두리, 버튼
-const ImVec4 kPinkHover = Rgb(0xFFE6EF);  // 마우스를 올렸을 때 채우는 색
-const ImVec4 kPinkMid = Rgb(0xF8BDD0);
-const ImVec4 kPinkText = Rgb(0xE0648D);   // 본문 글자
-const ImVec4 kPinkSoft = Rgb(0xE584A6);   // 설명 글자 (얇은 글꼴이라 너무 연하면 읽기 어렵다)
-const ImVec4 kPinkDeep = Rgb(0xD81B60);   // 강조 (로고의 사선과 같은 색)
+// 사용자가 정한 두 색: 연한 하늘색 #A6DAF4(구역 테두리), 진한 하늘색 #00AFF0(중요한 글, 주요 버튼).
+// 나머지는 이 두 색에서 만든 단계다 (흰 바탕에서 읽히도록 본문과 설명은 조금 어둡게).
+const ImVec4 kSky = Rgb(0xA6DAF4);       // 연한 하늘색: 구역과 입력 칸 테두리
+const ImVec4 kSkyDeep = Rgb(0x00AFF0);   // 진한 하늘색: 제목, 중요한 글, 주요 버튼 (로고의 사선과 같은 색)
+const ImVec4 kSkyHover = Rgb(0xEAF6FD);  // 마우스를 올렸을 때 채우는 색
+const ImVec4 kSkyMid = Rgb(0xD0ECFA);    // 누르고 있을 때 / 선택된 항목
+const ImVec4 kSkyText = Rgb(0x3592BE);   // 옵션 이름
+const ImVec4 kSkySoft = Rgb(0x68AACB);   // 설명 글, 상태
+const ImVec4 kSkyPress = Rgb(0x0093CC);  // 진한 버튼을 누르고 있을 때
+const ImVec4 kSkyLift = Rgb(0x3CC3F5);   // 진한 버튼에 마우스를 올렸을 때
 
-// 구역별 색 묶음. 대상 창(가장 중요한 곳)은 분홍, 나머지 설정은 눈에 덜 띄게 회색 단계로 칠한다.
+// 구역 색 묶음. 모든 구역을 연한 하늘색 테두리로 잡고, 중요한 글만 진한 하늘색으로 쓴다.
 struct Palette {
     ImVec4 border;  // 상자와 입력 칸 테두리
     ImVec4 title;   // "* 구역 제목" (가장 진하게)
@@ -90,10 +94,8 @@ struct Palette {
     ImVec4 fill;    // 체크 표시, 슬라이더 손잡이
     ImVec4 fillActive;
 };
-const Palette kPinkPalette = { kPink, kPinkDeep, kPinkText, kPinkSoft, kPinkHover, kPinkMid, kPink, kPinkDeep };
-const Palette kGrayPalette = { Rgb(0xD0D0D0), Rgb(0x666666), Rgb(0x7D7D7D), Rgb(0xA3A3A3),
-                               Rgb(0xF3F3F3), Rgb(0xE4E4E4), Rgb(0x9C9C9C), Rgb(0x6E6E6E) };
-const Palette* g_pal = &kPinkPalette;
+const Palette kSkyPalette = { kSky, kSkyDeep, kSkyText, kSkySoft, kSkyHover, kSkyMid, kSky, kSkyDeep };
+const Palette* g_pal = &kSkyPalette;
 
 // 지금부터 그리는 위젯에 색 묶음을 적용한다 (PopPalette로 되돌린다)
 void PushPalette(const Palette& p)
@@ -118,7 +120,7 @@ void PushPalette(const Palette& p)
 void PopPalette()
 {
     ImGui::PopStyleColor(14);
-    g_pal = &kPinkPalette;
+    g_pal = &kSkyPalette;
 }
 
 const char* kModeDescriptions[MODE_COUNT] = {
@@ -129,12 +131,11 @@ const char* kModeDescriptions[MODE_COUNT] = {
     "AMD FSR 1.0. 윤곽선이 가장 깔끔해요. (추천)",
 };
 
-// 설명 글 (얇은 글꼴로 표시)
+// 설명 글 (연한 색으로 표시). 기능 설명은 대부분 (?) 도움말로 옮겼다.
 const char* kSubtitle = "v" OPENSCALER_VERSION "  ·  창 모드 게임 업스케일러 · 프레임 생성";
 const char* kSharpnessDesc = "확대로 흐려진 윤곽선을 또렷하게 해요. 너무 높으면 테두리가 하얗게 번져요.";
 const char* kIntegerDesc = "2배, 3배처럼 정수 배율로만 키워 픽셀이 고르게 커져요. 픽셀 아트용, 가장자리에 여백이 생길 수 있어요.";
 const char* kFpsFormat = "출력 %.0f fps · 캡처 %.0f fps";
-const char* kFooter = "설정은 OpenScaler.ini에 자동 저장돼요";
 const char* kModeRifeDesc = "RIFE: 신경망으로 게임 프레임 사이의 움직임을 찾아 중간 프레임을 넣어요. 빠른 움직임에 강하지만 GPU를 더 쓰고, 화면이 한 프레임과 계산 시간만큼 늦어져요. 게임별 학습은 적용되지 않아요.";
 const char* kModeBlockDesc = "블록 매칭: 화면을 작은 칸으로 나눠 움직임을 찾아 중간 프레임을 넣어요. 게임별 학습으로 게임마다 값이 맞춰져요. 화면이 한 프레임 늦어져요.";
 const char* kModeExtrapolateDesc = "외삽: 지금까지의 움직임으로 다음 게임 프레임이 오기 전 장면을 미리 만들어요. 늦어지지 않지만 덜 정확해요.";
@@ -145,15 +146,15 @@ const char* kRifeLoading = "RIFE 준비 중이에요. 그동안은 블록 매칭
 const char* kRifeFailed = "RIFE를 쓸 수 없어 블록 매칭을 써요. 실행 파일 옆 rife 폴더를 확인하세요.";
 const char* kRifeMissing = "실행 파일 옆에 rife 폴더가 없어 블록 매칭을 써요.";
 const char* kLearnDesc = "게임 프레임을 가리고 다시 만들어 채점하며 게임마다 값을 맞춰요. 보간과 외삽은 따로 배워요. 화면은 저장하지 않아요.";
-const char* kLearnInterpFormat = "보간: 채점 %d회 · 설정을 바꾼 횟수 %d회 · 기본값과 다른 설정 %d개";
-const char* kLearnExtrapFormat = "외삽: 채점 %d회 · 설정을 바꾼 횟수 %d회 · 기본값과 다른 설정 %d개";
-const char* kGraphLegend = "분홍: 프레임 생성 · 회색: 두 장을 단순히 섞은 것 (dB, 높을수록 좋음)";
-const char* kGraphLegendExtrap = "분홍: 외삽 · 회색: 앞 프레임을 그대로 둔 것 (dB, 높을수록 좋음)";
+const char* kLearnInterpFormat = "보간: 채점 %d회 · 기본값과 다른 설정 %d개";
+const char* kLearnExtrapFormat = "외삽: 채점 %d회 · 기본값과 다른 설정 %d개";
+const char* kGraphLegend = "진한 선: 프레임 생성 · 연한 선: 단순 섞기";
+const char* kGraphLegendExtrap = "진한 선: 외삽 · 연한 선: 앞 프레임 그대로";
 const char* kNoProfiles = "아직 기록이 없어요. 프레임 생성을 켜고 게임을 확대하면 생겨요.";
 const char* kNoHistory = "채점이 20번 쌓이면 그래프가 나와요";
 const char* kSlowMoDesc = "짧게 녹화해 프레임을 채운 뒤 느리게 틀어요. 고주사율 모니터가 없어도 그 모니터에서 보일 장면을 모두 볼 수 있어요. 프레임 생성이 꺼져 있어도 돼요.";
 const char* kSlowMoIdle = "확대를 시작하면 쓸 수 있어요";
-const char* kSlowMoPlan = "%d초 녹화 → %d장 → %.1f초 동안 재생";
+const char* kSlowMoPlan = "%d초 녹화 > %d장 > %.1f초 동안 재생";
 const char* kSlowMoWaiting = "곧 녹화해요. 게임 창을 눌러 주세요";
 const char* kSlowMoRecording = "녹화 중이에요";
 const char* kSlowMoGenerating = "프레임 만드는 중 %d / %d";
@@ -183,19 +184,11 @@ const char* kEverywhereDesc = "화면 대부분이 움직여서 영역을 줄여
 const char* kLearnGainFormat = "%s 최근 채점 %d회 평균, 기준보다 %+.1f dB";
 const char* kShareNotYet = "채점이 200회 넘게 쌓이면 공유하기 좋아요";
 const char* kShareDesc = "잘 학습된 데이터를 파일로 주고받을 수 있어요. 방법은 저장소의 docs/sharing-profiles.md에 있어요.";
-const char* kSecondaryTexts[] = { kLearnGainFormat, kShareNotYet, kShareDesc, kRegionDesc, kRegionIdle, kRegionNone, kRegionFormat, kRegionEditing,
-                                  kRegionAdviceNoFg, kRegionAdviceNotEnough, kRegionAdviceStill, kRegionAdviceEverywhere, kRegionRecommendHelp,
-                                  kOverlayHint, kOverlayShareNote, kOverlayCaptureNote, kAskRegionDesc, kComputingFormat, kComputingStill,
-                                  kEverywhereDesc, kSubtitle, kSharpnessDesc, kIntegerDesc, kFpsFormat, kFooter, kModeRifeDesc, kModeBlockDesc, kModeExtrapolateDesc, kFgStatusFormat, kFgNoRoomFormat,
-                                  kFgRifeFormat, kRifeLoading, kRifeFailed, kRifeMissing,
-                                  kSlowMoDesc, kSlowMoIdle, kSlowMoPlan, kSlowMoWaiting, kSlowMoRecording, kSlowMoGenerating, kSlowMoPlaying,
-                                  kLearnDesc, kLearnInterpFormat, kLearnExtrapFormat, kGraphLegend, kGraphLegendExtrap, kNoProfiles, kNoHistory,
-                                  "(?)" };
 
 const char* kHotkeys[][2] = {
     { "Alt+Shift+S", "확대 시작/중지" },
     { "Alt+Shift+M", "알고리즘 변경" },
-    { "Alt+Shift+↑↓", "샤프닝 조절" },
+    { "Alt+Shift+Up/Down", "샤프닝 조절" },
     { "Alt+Shift+I", "정수배 스케일링" },
     { "Alt+Shift+C", "비교 모드" },
     { "Alt+Shift+O", "상태 표시 항상 켜기" },
@@ -343,22 +336,11 @@ void SetupFonts()
     if (ranges.empty()) {
         ImFontGlyphRangesBuilder builder;
         builder.AddRanges(io.Fonts->GetGlyphRangesKorean());
-        builder.AddText("→←↑↓…♥·×▼");
+        builder.AddText("…·×▼%");  // Neo둥근모 Pro에는 화살표와 ♥가 없어 화면 글에 쓰지 않는다
         builder.BuildRanges(&ranges);
     }
 
-    // 설명 글꼴은 정해진 문장만 쓰므로, 그 문장에 나오는 글자만 담아 글꼴 텍스처를 작게 유지한다.
-    static ImVector<ImWchar> thinRanges;
-    if (thinRanges.empty()) {
-        ImFontGlyphRangesBuilder builder;
-        builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
-        builder.AddText("→↑↓…♥·×▼");
-        for (const char* text : kModeDescriptions) builder.AddText(text);
-        for (const char* text : kSecondaryTexts) builder.AddText(text);
-        builder.BuildRanges(&thinRanges);
-    }
-
-    // 픽셀 글꼴: 12px의 정수 배로만 그려야 각진 모양이 유지된다.
+    // 픽셀 글꼴은 16px 기준이지만, 화면에서 조금 작게 보이도록 본문 14px, 덜 중요한 글 12px (x P)로 그린다.
     ImFontConfig cfg;
     cfg.FontDataOwnedByAtlas = false;  // 리소스 메모리라 해제하면 안 된다
     cfg.OversampleH = cfg.OversampleV = 1;
@@ -367,19 +349,14 @@ void SetupFonts()
     void* data = nullptr;
     int size = 0;
     if (LoadFontResource(IDR_PIXEL_FONT, &data, &size)) {
-        g_fontBody = io.Fonts->AddFontFromMemoryTTF(data, size, 12.0f * P, &cfg, ranges.Data);
-        g_fontTitle = io.Fonts->AddFontFromMemoryTTF(data, size, 24.0f * P, &cfg, io.Fonts->GetGlyphRangesDefault());
+        g_fontBody = io.Fonts->AddFontFromMemoryTTF(data, size, 14.0f * P, &cfg, ranges.Data);
+        g_fontTitle = io.Fonts->AddFontFromMemoryTTF(data, size, 28.0f * P, &cfg, io.Fonts->GetGlyphRangesDefault());
+        g_fontThin = io.Fonts->AddFontFromMemoryTTF(data, size, 12.0f * P, &cfg, ranges.Data);
     } else {
         ImFontConfig def;
-        def.SizePixels = 13.0f * P;
-        g_fontBody = g_fontTitle = io.Fonts->AddFontDefault(&def);
+        def.SizePixels = 14.0f * P;
+        g_fontBody = g_fontTitle = g_fontThin = io.Fonts->AddFontDefault(&def);
     }
-
-    // 설명 글은 얇은 글꼴(Galmuri11 Condensed, 1px 획)로 옵션 이름(Bold)과 구분한다.
-    if (LoadFontResource(IDR_PIXEL_FONT_THIN, &data, &size))
-        g_fontThin = io.Fonts->AddFontFromMemoryTTF(data, size, 12.0f * P, &cfg, thinRanges.Data);
-    else
-        g_fontThin = g_fontBody;
 }
 
 void SetupStyle()
@@ -413,37 +390,37 @@ void SetupStyle()
     st.AntiAliasedFill = false;
 
     ImVec4* c = st.Colors;
-    c[ImGuiCol_Text] = kPinkText;
-    c[ImGuiCol_TextDisabled] = kPinkSoft;
+    c[ImGuiCol_Text] = kSkyText;
+    c[ImGuiCol_TextDisabled] = kSkySoft;
     c[ImGuiCol_WindowBg] = kWhite;
     c[ImGuiCol_ChildBg] = kWhite;
     c[ImGuiCol_PopupBg] = kWhite;
-    c[ImGuiCol_Border] = kPink;
+    c[ImGuiCol_Border] = kSky;
     c[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_FrameBg] = kWhite;
-    c[ImGuiCol_FrameBgHovered] = kPinkHover;
-    c[ImGuiCol_FrameBgActive] = kPinkHover;
+    c[ImGuiCol_FrameBgHovered] = kSkyHover;
+    c[ImGuiCol_FrameBgActive] = kSkyHover;
     c[ImGuiCol_Button] = kWhite;
-    c[ImGuiCol_ButtonHovered] = kPinkHover;
-    c[ImGuiCol_ButtonActive] = kPinkMid;
-    c[ImGuiCol_Header] = kPinkMid;
-    c[ImGuiCol_HeaderHovered] = kPinkHover;
-    c[ImGuiCol_HeaderActive] = kPinkMid;
-    c[ImGuiCol_CheckMark] = kPink;
-    c[ImGuiCol_SliderGrab] = kPink;
-    c[ImGuiCol_SliderGrabActive] = kPinkDeep;
-    c[ImGuiCol_Separator] = kPink;
-    c[ImGuiCol_SeparatorHovered] = kPink;
-    c[ImGuiCol_SeparatorActive] = kPink;
+    c[ImGuiCol_ButtonHovered] = kSkyHover;
+    c[ImGuiCol_ButtonActive] = kSkyMid;
+    c[ImGuiCol_Header] = kSkyMid;
+    c[ImGuiCol_HeaderHovered] = kSkyHover;
+    c[ImGuiCol_HeaderActive] = kSkyMid;
+    c[ImGuiCol_CheckMark] = kSky;
+    c[ImGuiCol_SliderGrab] = kSky;
+    c[ImGuiCol_SliderGrabActive] = kSkyDeep;
+    c[ImGuiCol_Separator] = kSky;
+    c[ImGuiCol_SeparatorHovered] = kSky;
+    c[ImGuiCol_SeparatorActive] = kSky;
     c[ImGuiCol_ScrollbarBg] = kWhite;
-    c[ImGuiCol_ScrollbarGrab] = kPinkMid;
-    c[ImGuiCol_ScrollbarGrabHovered] = kPink;
-    c[ImGuiCol_ScrollbarGrabActive] = kPinkDeep;
+    c[ImGuiCol_ScrollbarGrab] = kSkyMid;
+    c[ImGuiCol_ScrollbarGrabHovered] = kSky;
+    c[ImGuiCol_ScrollbarGrabActive] = kSkyDeep;
     c[ImGuiCol_TableRowBg] = kWhite;
-    c[ImGuiCol_TableRowBgAlt] = kPinkHover;
-    c[ImGuiCol_TableBorderLight] = kPinkMid;
-    c[ImGuiCol_TableBorderStrong] = kPink;
-    c[ImGuiCol_NavHighlight] = kPinkDeep;
+    c[ImGuiCol_TableRowBgAlt] = kSkyHover;
+    c[ImGuiCol_TableBorderLight] = kSkyMid;
+    c[ImGuiCol_TableBorderStrong] = kSky;
+    c[ImGuiCol_NavHighlight] = kSkyDeep;
 }
 
 // Windows 배율에 맞는 픽셀 크기: 100%~150%는 2배, 175% 이상은 3배
@@ -456,7 +433,7 @@ void ApplyScale(float dpiScale)
     P = PixelScaleFor(dpiScale);
     SetupStyle();
     SetupFonts();
-    LoadLogo(26 * P);
+    LoadLogo(30 * P);
 }
 
 // ---------------------------------------------------------------------------
@@ -489,7 +466,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_GETMINMAXINFO: {
         auto mmi = reinterpret_cast<MINMAXINFO*>(lp);
-        mmi->ptMinTrackSize = { (LONG)(280 * P), (LONG)(300 * P) };
+        mmi->ptMinTrackSize = { (LONG)(330 * P), (LONG)(330 * P) };
         return 0;
     }
     case WM_DPICHANGED: {
@@ -533,32 +510,50 @@ void DrawHeart(ImDrawList* dl, ImVec2 pos, ImU32 color)
 }
 
 // 테두리 상자 안에 내용을 넣는다. 제목은 언더테일 대사처럼 "* "로 시작한다.
-void BeginBox(const char* id, const char* title, const Palette& palette)
+void HelpMarker(const char* text);
+
+// 두 열의 아랫단을 맞추려고, 다음 상자의 최소 높이를 정하고 마지막 상자의 위치와 내용 높이를 남긴다.
+float g_nextBoxMinHeight = 0;
+struct BoxFit { float top = 0, natural = 0, bottom = 0; };
+BoxFit g_lastBox;
+
+// help가 있으면 제목 옆에 (?)를 붙인다.
+void BeginBox(const char* id, const char* title, const Palette& palette, const char* help = nullptr)
 {
     PushPalette(palette);
+    g_lastBox.top = ImGui::GetCursorScreenPos().y;
+    if (g_nextBoxMinHeight > 0) {
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0, g_nextBoxMinHeight), ImVec2(FLT_MAX, FLT_MAX));
+        g_nextBoxMinHeight = 0;
+    }
     ImGui::BeginChild(id, ImVec2(-FLT_MIN, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+    if (!title) return;  // 접는 머리글 아래에 붙는 상자는 제목을 쓰지 않는다
     ImGui::PushStyleColor(ImGuiCol_Text, palette.title);
     ImGui::Text("* %s", title);
     ImGui::PopStyleColor();
+    if (help) HelpMarker(help);
 }
 
 void EndBox()
 {
+    // 늘린 상자도 내용만의 높이를 알 수 있게 끝 위치로 잰다.
+    g_lastBox.natural = ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y + ImGui::GetStyle().WindowPadding.y;
     ImGui::EndChild();
+    g_lastBox.bottom = ImGui::GetItemRectMax().y;
     PopPalette();
     ImGui::Dummy(ImVec2(0, 2.0f * P));
 }
 
-// 하트가 붙은 큰 버튼 (filled: 분홍으로 채운 주요 버튼)
+// 하트가 붙은 큰 버튼 (fill: 버튼을 채우는 색)
 bool HeartButton(const char* label, ImVec4 fill, ImVec4 hover, ImVec4 active)
 {
     ImGui::PushStyleColor(ImGuiCol_Button, fill);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hover);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, active);
     ImGui::PushStyleColor(ImGuiCol_Text, kWhite);
-    ImGui::PushStyleColor(ImGuiCol_Border, kPinkDeep);
+    ImGui::PushStyleColor(ImGuiCol_Border, kSkyDeep);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f * P);
-    bool pressed = ImGui::Button(label, ImVec2(-FLT_MIN, 24.0f * P));
+    bool pressed = ImGui::Button(label, ImVec2(-FLT_MIN, 26.0f * P));
     ImGui::PopStyleVar();
     ImGui::PopStyleColor(5);
 
@@ -575,7 +570,7 @@ bool HeartButton(const char* label, ImVec4 fill, ImVec4 hover, ImVec4 active)
 bool PixelCheckbox(const char* label, bool* value)
 {
     const float u = (float)P;
-    const float box = 10 * u;
+    const float box = 11 * u;
     const float textH = ImGui::GetTextLineHeight();
     ImVec2 textSize = ImGui::CalcTextSize(label, nullptr, true);
     ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -619,15 +614,17 @@ void HelpMarker(const char* text)
     ImGui::TextDisabled("(?)");
     ImGui::PopFont();
     if (ImGui::BeginItemTooltip()) {
+        ImGui::PushFont(g_fontThin);
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 18.0f);
         ImGui::TextUnformatted(text);
         ImGui::PopTextWrapPos();
+        ImGui::PopFont();
         ImGui::EndTooltip();
     }
 }
 
 // 왼쪽에 이름, 오른쪽에 입력 위젯이 오는 한 줄
-const float kLabelWidth = 52;
+const float kLabelWidth = 68;
 void RowLabel(const char* label)
 {
     ImGui::AlignTextToFramePadding();
@@ -739,7 +736,7 @@ void DrawScoreGraph(const std::vector<float>& motion, const std::vector<float>& 
         }
     };
     plot(blend, Col(g_pal->fill));
-    plot(motion, Col(kPinkDeep));
+    plot(motion, Col(kSkyDeep));
 }
 
 void DrawLearning(const ScalingStatus& status)
@@ -750,8 +747,8 @@ void DrawLearning(const ScalingStatus& status)
     if (g_profileNames.empty() && !(active && active->interp.evalCount + active->extrap.evalCount > 0)) {
         Description(kNoProfiles);
         if (g_inOverlay) return;
-        Description(kShareDesc);
         ImportProfileButton();
+        HelpMarker(kShareDesc);
         DrawShareMessage();
         return;
     }
@@ -782,17 +779,17 @@ void DrawLearning(const ScalingStatus& status)
         const int differs = (p.cellPx != defaults.cellPx) + (p.coarseRadius != defaults.coarseRadius) + (p.smoothness != defaults.smoothness) +
                             (p.blendTol != defaults.blendTol) + (p.useMap != defaults.useMap);
         char text[192];
-        snprintf(text, sizeof(text), k == 0 ? kLearnInterpFormat : kLearnExtrapFormat, l.evalCount, l.adoptedCount, differs);
+        snprintf(text, sizeof(text), k == 0 ? kLearnInterpFormat : kLearnExtrapFormat, l.evalCount, differs);
         Description(text);
         char detail[512];
         snprintf(detail, sizeof(detail),
-                 "%s에 쓰는 값 (괄호는 기본값)\n"
+                 "%s에 쓰는 값 (괄호는 기본값, 설정을 바꾼 횟수 %d회)\n"
                  "움직임을 찾는 칸 크기: %d픽셀 (%d)\n"
                  "움직임을 찾는 범위: %d (%d)\n"
                  "주변과 다른 움직임에 주는 벌점: %.4f (%.4f)\n"
                  "합성할 때 허용하는 밝기 차이: %.2f (%.2f)\n"
                  "화면 지도: %s (%s)",
-                 k == 0 ? "보간" : "외삽", p.cellPx, defaults.cellPx, p.coarseRadius, defaults.coarseRadius, p.smoothness, defaults.smoothness,
+                 k == 0 ? "보간" : "외삽", l.adoptedCount, p.cellPx, defaults.cellPx, p.coarseRadius, defaults.coarseRadius, p.smoothness, defaults.smoothness,
                  p.blendTol, defaults.blendTol, p.useMap ? "씀" : "안 씀", defaults.useMap ? "씀" : "안 씀");
         HelpMarker(detail);
     }
@@ -802,6 +799,7 @@ void DrawLearning(const ScalingStatus& status)
     if (shown.history.size() >= 2) {
         DrawScoreGraph(shown.history, shown.baseline);
         Description(showExtrap ? kGraphLegendExtrap : kGraphLegend);
+        HelpMarker("최근 채점 점수예요 (dB, 높을수록 정답에 가까워요). 진한 선이 연한 선보다 위에 있으면 학습한 값이 단순한 방법보다 나아요.");
     } else {
         Description(kNoHistory);
     }
@@ -822,7 +820,6 @@ void DrawLearning(const ScalingStatus& status)
         Description(kOverlayShareNote);
         return;
     }
-    Description(kShareDesc);
     if (ImGui::Button("공유용으로 내보내기")) {
         const std::wstring file = PickProfileFile(true, ProfilePath(L"", g_profileSelected).substr(1));
         if (!file.empty())
@@ -830,6 +827,7 @@ void DrawLearning(const ScalingStatus& status)
     }
     ImGui::SameLine();
     ImportProfileButton();
+    HelpMarker(kShareDesc);
     DrawShareMessage();
 
     ImGui::BeginDisabled(isActive);
@@ -844,32 +842,32 @@ void DrawLearning(const ScalingStatus& status)
 // 화면 구성
 // ---------------------------------------------------------------------------
 
-// 업스케일부터 화면 표시 · 마우스까지의 구역. 설정 창과 확대 화면 위 메뉴가 함께 쓴다.
-void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
+// 설정 구역들. 설정 창(두 열)과 확대 화면 위 메뉴(한 열)가 함께 쓴다.
+void DrawUpscaleBox(Settings& s, bool& changed)
 {
-    const float u = (float)P;
-    (void)u;
-    // 업스케일 (여기부터는 회색으로 눈에 덜 띄게)
-    BeginBox("##upscale", "업스케일", kGrayPalette);
+    BeginBox("##upscale", "업스케일", kSkyPalette);
     RowLabel("알고리즘");
+    LeaveRoomForHelp();
     if (ImGui::Combo("##mode", &s.mode, kModeNames, MODE_COUNT)) changed = true;
-    Description(kModeDescriptions[s.mode]);
+    HelpMarker(kModeDescriptions[s.mode]);
 
     RowLabel("샤프닝");
+    LeaveRoomForHelp();
     ImGui::SliderFloat("##sharp", &s.sharpness, 0.0f, 1.0f, s.sharpness <= 0.0f ? "끔" : "%.2f");
     if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;
-    Description(kSharpnessDesc);
+    HelpMarker(kSharpnessDesc);
 
     if (PixelCheckbox("정수배 스케일링", &s.integerScale)) changed = true;
-    Description(kIntegerDesc);
+    HelpMarker(kIntegerDesc);
     EndBox();
+}
 
-    // 프레임 생성
-    BeginBox("##framegen", "프레임 생성", kGrayPalette);
+void DrawFrameGenBox(Settings& s, const ScalingStatus& status, bool& changed)
+{
+    BeginBox("##framegen", "프레임 생성", kSkyPalette);
     if (PixelCheckbox("프레임 생성 켜기", &s.frameGen)) changed = true;
+    HelpMarker("게임 프레임 사이에 새 프레임을 만들어 넣어 화면을 부드럽게 해요. 보간은 화면이 한 프레임 늦어져요.");
     const int fgMode = FgModeOf(s);
-    static const char* const kModeDescs[FG_MODE_COUNT] = { kModeBlockDesc, kModeRifeDesc, kModeExtrapolateDesc };
-    Description(kModeDescs[fgMode]);
 
     // 방식: 생성기와 보간/외삽을 하나로 묶었다. 기본값은 게임별 학습이 맞추는 블록 매칭 보간이다.
     static const char* const kFgModeNames[FG_MODE_COUNT] = { "블록 매칭 보간 (기본)", "RIFE 보간", "블록 매칭 외삽 (실험)" };
@@ -880,9 +878,15 @@ void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
         SetFgMode(s, modeIndex);
         changed = true;
     }
-    HelpMarker("블록 매칭 보간: 기본값이에요. 쓸수록 게임별 학습이 그 게임에 맞춰요.\n"
-               "RIFE 보간: 빠른 움직임이나 밝기 변화가 많아 블록 매칭이 깨질 때 고르세요. GPU를 더 쓰고, 준비하는 몇 초 동안과 rife 폴더가 없을 때는 블록 매칭을 써요.\n"
-               "블록 매칭 외삽: 화면이 늦어지는 것이 싫을 때 고르세요. 일정하게 움직이는 리듬게임 노트용 실험 기능이에요.");
+    {
+        static const char* const kModeDescs[FG_MODE_COUNT] = { kModeBlockDesc, kModeRifeDesc, kModeExtrapolateDesc };
+        char help[768];
+        snprintf(help, sizeof(help), "%s\n\n"
+                 "블록 매칭 보간: 기본값이에요. 쓸수록 게임별 학습이 그 게임에 맞춰요.\n"
+                 "RIFE 보간: 빠른 움직임이나 밝기 변화가 많아 블록 매칭이 깨질 때 고르세요. GPU를 더 쓰고, 준비하는 몇 초 동안과 rife 폴더가 없을 때는 블록 매칭을 써요.\n"
+                 "블록 매칭 외삽: 화면이 늦어지는 것이 싫을 때 고르세요. 일정하게 움직이는 리듬게임 노트용 실험 기능이에요.", kModeDescs[fgMode]);
+        HelpMarker(help);
+    }
     if (fgMode == FG_MODE_RIFE) {
         if (!RifeEngine::FilesExist(RifeEngine::DefaultDirectory())) Description(kRifeMissing);
         else if (status.fgRifeState == 0) Description(kRifeLoading);
@@ -892,10 +896,12 @@ void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
     static const char* const kMultiplierNames[] = { "자동 (주사율까지)", "2배", "3배", "4배" };
     int multiplierIndex = s.fgMultiplier >= 2 ? s.fgMultiplier - 1 : 0;
     RowLabel("배수");
+    LeaveRoomForHelp();
     if (ImGui::Combo("##fgmult", &multiplierIndex, kMultiplierNames, IM_ARRAYSIZE(kMultiplierNames))) {
         s.fgMultiplier = multiplierIndex == 0 ? 0 : multiplierIndex + 1;
         changed = true;
     }
+    HelpMarker("자동이면 게임 프레임 사이를 모니터 주사율까지 채워요.");
     static const char* const kQualityNames[] = { "낮음 (빠름)", "기본", "높음 (느림)" };
     RowLabel("정밀도");
     LeaveRoomForHelp();
@@ -915,8 +921,9 @@ void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
     }
 
     // 프레임 생성 영역: 확대 중인 게임의 프로필에 저장한다.
-    RowLabel("영역");
-    Description(kRegionDesc);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("영역");
+    HelpMarker(kRegionDesc);
     {
         const GameProfile* profile = AppActiveProfile();
         const bool editing = AppRegionEditing();
@@ -964,10 +971,43 @@ void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
         Description(fgText);
     }
     EndBox();
+}
 
-    // 슬로모션 테스트
-    BeginBox("##slowmo", "슬로모션 테스트", kGrayPalette);
-    Description(kSlowMoDesc);
+// 접는 머리글 (단축키, 슬로모션 테스트). 기본으로 접혀 있다.
+// ImGui의 CollapsingHeader는 칸 바깥 여백까지 넓어져 두 열이 겹치므로, 상자와 같은 폭으로 직접 그린다.
+bool FoldHeader(const char* label)
+{
+    const float u = (float)P;
+    ImGuiStorage* storage = ImGui::GetStateStorage();
+    const ImGuiID id = ImGui::GetID(label);
+    bool open = storage->GetBool(id, false);
+    const float h = ImGui::GetTextLineHeight() + ImGui::GetStyle().FramePadding.y * 2;
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 p1(p0.x + ImGui::GetContentRegionAvail().x, p0.y + h);
+    if (ImGui::InvisibleButton(label, ImVec2(p1.x - p0.x, h))) {
+        open = !open;
+        storage->SetBool(id, open);
+    }
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p0, p1, Col(hovered ? kSkyMid : kSkyHover));
+    dl->AddRect(p0, p1, Col(kSky), 0, 0, 2 * u);
+    // 삼각형: 접혀 있으면 오른쪽, 펼치면 아래
+    const float cx = p0.x + 9 * u, cy = std::floor((p0.y + p1.y) * 0.5f), r = 4 * u;
+    if (open) dl->AddTriangleFilled(ImVec2(cx - r, cy - r * 0.6f), ImVec2(cx + r, cy - r * 0.6f), ImVec2(cx, cy + r * 0.8f), Col(kSkyDeep));
+    else dl->AddTriangleFilled(ImVec2(cx - r * 0.6f, cy - r), ImVec2(cx - r * 0.6f, cy + r), ImVec2(cx + r * 0.8f, cy), Col(kSkyDeep));
+    dl->AddText(ImVec2(p0.x + 18 * u, p0.y + ImGui::GetStyle().FramePadding.y), Col(kSkyDeep), label);
+    return open;
+}
+
+// 슬로모션 테스트: 자주 쓰지 않으므로 접어 둔다.
+void DrawSlowMoBox(Settings& s, const ScalingStatus& status, bool& changed)
+{
+    if (!FoldHeader("슬로모션 테스트")) {
+        ImGui::Dummy(ImVec2(0, 2.0f * P));
+        return;
+    }
+    BeginBox("##slowmo", nullptr, kSkyPalette);
     static const char* const kSlowMoFpsNames[] = { "모니터 주사율", "120Hz", "144Hz", "180Hz", "240Hz" };
     static const int kSlowMoFpsValues[] = { 0, 120, 144, 180, 240 };
     int slowMoFpsIndex = 0;
@@ -979,8 +1019,12 @@ void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
         s.slowMoTargetFps = kSlowMoFpsValues[slowMoFpsIndex];
         changed = true;
     }
-    HelpMarker("몇 Hz 모니터에서 보일 장면을 만들지 정해요. 게임 프레임 사이를 그만큼 채워요.\n"
-               "모니터 주사율이 120Hz보다 낮으면 120Hz로 만들어요.");
+    {
+        char help[512];
+        snprintf(help, sizeof(help), "%s\n\n몇 Hz 모니터에서 보일 장면을 만들지 정해요. 게임 프레임 사이를 그만큼 채워요.\n"
+                 "모니터 주사율이 120Hz보다 낮으면 120Hz로 만들어요.", kSlowMoDesc);
+        HelpMarker(help);
+    }
     static const char* const kSlowMoSecondNames[] = { "1초", "2초", "3초" };
     int slowMoSecondIndex = std::clamp(s.slowMoSeconds - 1, 0, 2);
     RowLabel("녹화 길이");
@@ -1006,20 +1050,24 @@ void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
         Description(slowMoText);
     }
     ImGui::BeginDisabled(!status.active);
-    if (HeartButton(status.slowMoState == SLOWMO_OFF ? "3초 뒤 녹화" : "슬로모션 끝내기", g_pal->fill, g_pal->hover, g_pal->active))
+    if (HeartButton(status.slowMoState == SLOWMO_OFF ? "3초 뒤 녹화" : "슬로모션 끝내기", kSkyDeep, kSkyLift, kSkyPress))
         AppSlowMoToggle(3.0);
     ImGui::EndDisabled();
     EndBox();
+}
 
-    // 게임별 학습
-    BeginBox("##learning", "게임별 학습", kGrayPalette);
+void DrawLearningBox(Settings& s, const ScalingStatus& status, bool& changed)
+{
+    BeginBox("##learning", "게임별 학습", kSkyPalette);
     if (PixelCheckbox("게임별 학습 켜기", &s.fgLearn)) changed = true;
-    Description(kLearnDesc);
+    HelpMarker(kLearnDesc);
     DrawLearning(status);
     EndBox();
+}
 
-    // 화면 표시와 마우스
-    BeginBox("##options", "화면 표시 · 마우스", kGrayPalette);
+void DrawOptionsBox(Settings& s, bool& changed)
+{
+    BeginBox("##options", "화면 표시 · 마우스", kSkyPalette);
     if (PixelCheckbox("비교 모드", &s.compare)) changed = true;
     HelpMarker("화면을 반으로 나눠 왼쪽은 일반 확대(Bilinear, 프레임 생성 없음), 오른쪽은 OpenScaler 결과로 보여 줘요.");
     if (PixelCheckbox("상태 표시 항상 켜기", &s.osdAlways)) changed = true;
@@ -1028,6 +1076,34 @@ void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
     HelpMarker("확대하면 커서가 배율만큼 빨라져요.\n켜면 확대 중에만 Windows 마우스 속도를 낮춰 원래 속도에 맞추고, "
                "끝나면 되돌려요.");
     EndBox();
+}
+
+void DrawHotkeys()
+{
+    if (!FoldHeader("단축키")) return;
+    PushPalette(kSkyPalette);
+    if (ImGui::BeginTable("##hotkeys", 2, ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed, 135.0f * P);
+        for (auto& h : kHotkeys) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(h[0]);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(h[1]);
+        }
+        ImGui::EndTable();
+    }
+    PopPalette();
+}
+
+// 확대 화면 위 메뉴: 한 열로 차례대로
+void DrawSettingsBoxes(Settings& s, const ScalingStatus& status, bool& changed)
+{
+    DrawUpscaleBox(s, changed);
+    DrawFrameGenBox(s, status, changed);
+    DrawLearningBox(s, status, changed);
+    DrawOptionsBox(s, changed);
+    DrawSlowMoBox(s, status, changed);
 }
 
 void DrawUi()
@@ -1053,19 +1129,25 @@ void DrawUi()
         ImGui::Image((ImTextureID)g_logo.Get(), ImVec2((float)g_logoSize, (float)g_logoSize));
         ImGui::SameLine(0, 6 * u);
     }
-    ImGui::BeginGroup();
-    // 제목: "Open"은 연분홍, "Scaler"는 진한 분홍
+    // 제목: "Open"은 연한 하늘색, "Scaler"는 진한 하늘색. 버전 설명은 같은 줄 오른쪽에 아래를 맞춰 쓴다.
+    const float titleTop = ImGui::GetCursorPosY();
     ImGui::PushFont(g_fontTitle);
-    ImGui::TextColored(kPink, "Open");
+    const float titleH = ImGui::GetTextLineHeight();
+    ImGui::SetCursorPosY(titleTop + std::max(0.0f, ((float)g_logoSize - titleH) * 0.5f));
+    ImGui::TextColored(kSky, "Open");
     ImGui::SameLine(0, 0);
-    ImGui::TextColored(kPinkDeep, "Scaler");
+    ImGui::TextColored(kSkyDeep, "Scaler");
+    ImGui::PopFont();
+    ImGui::SameLine(0, 8 * u);
+    ImGui::PushFont(g_fontThin);
+    ImGui::SetCursorPosY(titleTop + std::max(0.0f, ((float)g_logoSize - titleH) * 0.5f) + titleH - ImGui::GetTextLineHeight() - 2 * u);
     ImGui::PopFont();
     Description(kSubtitle);
-    ImGui::EndGroup();
-    ImGui::Dummy(ImVec2(0, 2 * u));
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), titleTop + (float)g_logoSize + ImGui::GetStyle().ItemSpacing.y));
+    ImGui::Dummy(ImVec2(0, 1 * u));
 
     // 대상 창과 시작/중지
-    BeginBox("##target", "대상 창", kPinkPalette);
+    BeginBox("##target", "대상 창", kSkyPalette);
     {
         const char* refreshLabel = "새로고침";
         float refreshWidth = ImGui::CalcTextSize(refreshLabel).x + ImGui::GetStyle().FramePadding.x * 2;
@@ -1085,10 +1167,10 @@ void DrawUi()
         ImGui::EndDisabled();
 
         if (status.active) {
-            if (HeartButton("확대 중지", kPinkDeep, Rgb(0xE5487F), Rgb(0xB0124C))) AppStopScaling();
+            if (HeartButton("확대 중지", kSkyDeep, kSkyLift, kSkyPress)) AppStopScaling();
         } else {
             ImGui::BeginDisabled(!g_selected);
-            if (HeartButton("확대 시작", kPink, Rgb(0xF7AEC7), kPinkDeep)) {
+            if (HeartButton("확대 시작", kSkyDeep, kSkyLift, kSkyPress)) {
                 HWND target = g_selected;
                 if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
                 AppStartScaling(target);
@@ -1101,11 +1183,11 @@ void DrawUi()
         ImVec2 p = ImGui::GetCursorScreenPos();
         float lineH = ImGui::GetTextLineHeight();
         DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)),
-                  Col(status.active ? kPinkDeep : kPinkMid));
+                  Col(status.active ? kSkyDeep : kSkyMid));
         ImGui::Dummy(ImVec2(7 * u, lineH));
         ImGui::SameLine();
         if (status.active) {
-            ImGui::Text("확대 중  %u×%u → %u×%u", status.srcW, status.srcH, status.dstW, status.dstH);
+            ImGui::Text("확대 중  %u×%u > %u×%u", status.srcW, status.srcH, status.dstW, status.dstH);
             char fps[64];
             snprintf(fps, sizeof(fps), kFpsFormat, status.outputFps, status.captureFps);
             Description(fps);
@@ -1119,34 +1201,41 @@ void DrawUi()
     }
     EndBox();
 
-    DrawSettingsBoxes(s, status, changed);
-
-    // 단축키 (회색)
-    PushPalette(kGrayPalette);
-    ImGui::PushStyleColor(ImGuiCol_Text, kGrayPalette.title);
-    bool showHotkeys = ImGui::CollapsingHeader("단축키");
-    ImGui::PopStyleColor();
-    if (showHotkeys) {
-        if (ImGui::BeginTable("##hotkeys", 2, ImGuiTableFlags_RowBg)) {
-            ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed, 80 * u);
-            for (auto& h : kHotkeys) {
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(h[0]);
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(h[1]);
-            }
-            ImGui::EndTable();
-        }
+    // 왼쪽 열: 업스케일, 프레임 생성, 단축키 / 오른쪽 열: 게임별 학습, 화면 표시 · 마우스, 슬로모션 테스트.
+    // 창이 좁으면 한 열로 그린다.
+    const bool twoColumns = ImGui::GetContentRegionAvail().x >= 560.0f * P;
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(3 * u, 0));
+    if (twoColumns && ImGui::BeginTable("##columns", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoPadOuterX)) {
+        // 프레임 생성(왼쪽)과 화면 표시 · 마우스(오른쪽)의 아랫단을 맞춘다. 지난 프레임에 잰 값으로,
+        // 내용이 더 아래까지 오는 쪽은 그대로 두고 다른 쪽 상자를 그 아랫단까지 늘린다.
+        static BoxFit fit[2];
+        float minHeight[2] = { 0, 0 };
+        const int tall = fit[0].top + fit[0].natural >= fit[1].top + fit[1].natural ? 0 : 1;
+        if (fit[tall].bottom > 0) minHeight[1 - tall] = fit[tall].bottom - fit[1 - tall].top;
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        DrawUpscaleBox(s, changed);
+        g_nextBoxMinHeight = minHeight[0];
+        DrawFrameGenBox(s, status, changed);
+        fit[0] = g_lastBox;
+        ImGui::TableNextColumn();
+        DrawLearningBox(s, status, changed);
+        g_nextBoxMinHeight = minHeight[1];
+        DrawOptionsBox(s, changed);
+        fit[1] = g_lastBox;
+        // 단축키와 슬로모션 테스트는 같은 높이에서 시작한다.
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        DrawHotkeys();
+        ImGui::TableNextColumn();
+        DrawSlowMoBox(s, status, changed);
+        ImGui::EndTable();
+    } else {
+        DrawSettingsBoxes(s, status, changed);
+        DrawHotkeys();
     }
+    ImGui::PopStyleVar();
 
-    ImGui::Dummy(ImVec2(0, 2 * u));
-    Description(kFooter);
-    if (ImGui::BeginItemTooltip()) {
-        ImGui::TextUnformatted(ToUtf8(AppSettingsPath()).c_str());
-        ImGui::EndTooltip();
-    }
-    PopPalette();
 
     ImGui::End();
 
@@ -1166,19 +1255,19 @@ int PromptBox(const char* id, const char* title, const char* desc, const char* y
                      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
     if (!ImGui::IsPopupOpen(id)) ImGui::OpenPopup(id);
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(std::min(io.DisplaySize.x - 32 * u, 300.0f * u), 0));
+    ImGui::SetNextWindowSize(ImVec2(std::min(io.DisplaySize.x - 32 * u, 400.0f * u), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 2 * u);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12 * u, 10 * u));
-    ImGui::PushStyleColor(ImGuiCol_Border, kPink);
+    ImGui::PushStyleColor(ImGuiCol_Border, kSky);
     int pressed = 0;
     if (ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings)) {
         // 언더테일 대사처럼 "* "로 시작하고 하트를 붙인다.
         ImVec2 p = ImGui::GetCursorScreenPos();
         const float lineH = ImGui::GetTextLineHeight();
-        DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)), Col(kPinkDeep));
+        DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)), Col(kSkyDeep));
         ImGui::Dummy(ImVec2(7 * u, lineH));
         ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, kPinkDeep);
+        ImGui::PushStyleColor(ImGuiCol_Text, kSkyDeep);
         ImGui::PushTextWrapPos(0);
         ImGui::Text("* %s", title);
         ImGui::PopTextWrapPos();
@@ -1189,15 +1278,15 @@ int PromptBox(const char* id, const char* title, const char* desc, const char* y
         const float spacing = ImGui::GetStyle().ItemSpacing.x;
         const float half = (ImGui::GetContentRegionAvail().x - spacing) * 0.5f;
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2 * u);
-        ImGui::PushStyleColor(ImGuiCol_Button, kPink);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Rgb(0xF7AEC7));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, kPinkDeep);
+        ImGui::PushStyleColor(ImGuiCol_Button, kSkyDeep);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kSkyLift);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, kSkyPress);
         ImGui::PushStyleColor(ImGuiCol_Text, kWhite);
-        ImGui::PushStyleColor(ImGuiCol_Border, kPinkDeep);
-        if (ImGui::Button(yes, ImVec2(half, 22 * u))) pressed = 1;
+        ImGui::PushStyleColor(ImGuiCol_Border, kSkyDeep);
+        if (ImGui::Button(yes, ImVec2(half, 28 * u))) pressed = 1;
         ImGui::PopStyleColor(5);
         ImGui::SameLine();
-        if (ImGui::Button(no, ImVec2(half, 22 * u))) pressed = 2;
+        if (ImGui::Button(no, ImVec2(half, 28 * u))) pressed = 2;
         ImGui::PopStyleVar();
         if (pressed) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
@@ -1214,9 +1303,9 @@ void ComputingBanner(const OverlayView& view)
     const float u = (float)P;
     ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 12 * u), ImGuiCond_Always, ImVec2(0.5f, 0));
-    ImGui::SetNextWindowSize(ImVec2(std::min(io.DisplaySize.x - 32 * u, 300.0f * u), 0));
+    ImGui::SetNextWindowSize(ImVec2(std::min(io.DisplaySize.x - 32 * u, 400.0f * u), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2 * u);
-    ImGui::PushStyleColor(ImGuiCol_Border, kPink);
+    ImGui::PushStyleColor(ImGuiCol_Border, kSky);
     ImGui::Begin("##computing", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
@@ -1226,10 +1315,10 @@ void ComputingBanner(const OverlayView& view)
     const float lineH = ImGui::GetTextLineHeight();
     // 하트가 깜박이며 기다리는 중임을 보여 준다.
     const bool blink = std::fmod(ImGui::GetTime(), 1.0) < 0.5;
-    DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)), Col(blink ? kPinkDeep : kPinkMid));
+    DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)), Col(blink ? kSkyDeep : kSkyMid));
     ImGui::Dummy(ImVec2(7 * u, lineH));
     ImGui::SameLine();
-    ImGui::TextColored(kPinkDeep, "* %s", kComputingTitle);
+    ImGui::TextColored(kSkyDeep, "* %s", kComputingTitle);
     char text[192];
     if (view.still) snprintf(text, sizeof(text), "%s", kComputingStill);
     else snprintf(text, sizeof(text), kComputingFormat, std::min(view.seconds, view.needSeconds), view.needSeconds);
@@ -1239,9 +1328,9 @@ void ComputingBanner(const OverlayView& view)
     ImVec2 b0 = ImGui::GetCursorScreenPos();
     ImVec2 b1(b0.x + w, b0.y + 4 * u);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRect(b0, b1, Col(kPink), 0, 0, u);
+    dl->AddRect(b0, b1, Col(kSky), 0, 0, u);
     const float done = (float)std::clamp(view.seconds / std::max(1.0, view.needSeconds), 0.0, 1.0);
-    dl->AddRectFilled(ImVec2(b0.x + u, b0.y + u), ImVec2(b0.x + u + std::floor((w - 2 * u) * done), b1.y - u), Col(kPinkDeep));
+    dl->AddRectFilled(ImVec2(b0.x + u, b0.y + u), ImVec2(b0.x + u + std::floor((w - 2 * u) * done), b1.y - u), Col(kSkyDeep));
     ImGui::Dummy(ImVec2(w, 4 * u));
     ImGui::End();
 }
@@ -1254,11 +1343,11 @@ void DrawOverlayUi(bool& keepOpen)
     bool changed = false;
     const float u = (float)P;
     ImGuiIO& io = ImGui::GetIO();
-    const float w = std::min(io.DisplaySize.x - 16 * u, 330.0f * u);
+    const float w = std::min(io.DisplaySize.x - 16 * u, 440.0f * u);
     ImGui::SetNextWindowPos(ImVec2(std::floor(io.DisplaySize.x - w - 8 * u), 8 * u));
     ImGui::SetNextWindowSize(ImVec2(w, std::floor(io.DisplaySize.y - 16 * u)));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2 * u);
-    ImGui::PushStyleColor(ImGuiCol_Border, kPink);
+    ImGui::PushStyleColor(ImGuiCol_Border, kSky);
     ImGui::Begin("##overlay", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoSavedSettings);
@@ -1271,26 +1360,30 @@ void DrawOverlayUi(bool& keepOpen)
 
     // 머리말: 이름 + 닫기
     ImGui::PushFont(g_fontTitle);
-    ImGui::TextColored(kPink, "Open");
+    ImGui::TextColored(kSky, "Open");
     ImGui::SameLine(0, 0);
-    ImGui::TextColored(kPinkDeep, "Scaler");
+    ImGui::TextColored(kSkyDeep, "Scaler");
     ImGui::PopFont();
     const char* closeLabel = "닫기";
     const float closeW = ImGui::CalcTextSize(closeLabel).x + ImGui::GetStyle().FramePadding.x * 2;
     ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - closeW);
     if (ImGui::Button(closeLabel)) keepOpen = false;
-    Description(kOverlayHint);
-    Description(kOverlayCaptureNote);
+    Description("Alt+Shift+G로 열고 닫아요");
+    {
+        char help[512];
+        snprintf(help, sizeof(help), "%s\n%s", kOverlayHint, kOverlayCaptureNote);
+        HelpMarker(help);
+    }
     ImGui::Dummy(ImVec2(0, 2 * u));
 
     // 확대 상태와 중지
-    BeginBox("##ovtarget", "확대 중", kPinkPalette);
+    BeginBox("##ovtarget", "확대 중", kSkyPalette);
     if (status.active) {
-        ImGui::Text("%u×%u → %u×%u", status.srcW, status.srcH, status.dstW, status.dstH);
+        ImGui::Text("%u×%u > %u×%u", status.srcW, status.srcH, status.dstW, status.dstH);
         char fps[64];
         snprintf(fps, sizeof(fps), kFpsFormat, status.outputFps, status.captureFps);
         Description(fps);
-        if (HeartButton("확대 중지", kPinkDeep, Rgb(0xE5487F), Rgb(0xB0124C))) {
+        if (HeartButton("확대 중지", kSkyDeep, kSkyLift, kSkyPress)) {
             AppStopScaling();
             keepOpen = false;
         }
@@ -1329,11 +1422,11 @@ bool GuiCreate(ID3D11Device* device, ID3D11DeviceContext* context)
                              100, 100, nullptr, nullptr, inst, nullptr);
     if (!g_hwnd) return false;
 
-    // 창 크기: 픽셀 단위 315 x 432 (배율 P를 곱한다)
+    // 창 크기: 픽셀 단위 720 x 495 (배율 P를 곱한다). 대상 창 아래를 두 열로 나눈다.
     UINT dpi = GetDpiForWindow(g_hwnd);
     g_dpiScale = dpi / 96.0f;
     P = PixelScaleFor(g_dpiScale);
-    RECT rc = { 0, 0, (LONG)(315 * P), (LONG)(432 * P) };
+    RECT rc = { 0, 0, (LONG)(720 * P), (LONG)(495 * P) };
     AdjustWindowRectExForDpi(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
 
     // 작업 표시줄을 뺀 화면 가운데에 놓고, 화면보다 크면 높이를 줄인다 (넘치는 내용은 스크롤)

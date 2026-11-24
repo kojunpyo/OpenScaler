@@ -145,7 +145,7 @@ OpenScaler는 게임과 상관없이 **화면만 보고** 처리합니다. 게�
 
 ### 3.4 슬로모션 테스트
 
-고주사율 모니터가 없어도 만든 프레임을 볼 수 있게, 1초쯤 녹화해 모니터 주사율만큼(120Hz보다 낮으면 120Hz) 채운 뒤 느리게 재생합니다. 확대 중 Alt+Shift+T로 시작하고 끝냅니다. 재생 중에는 Alt+Shift+Space로 멈추고 Alt+Shift+←/→로 한 장씩 넘깁니다. 실제 지연과 끊김은 이 테스트로 알 수 없습니다.
+고주사율 모니터가 없어도 만든 프레임을 볼 수 있게, 1초쯤 녹화해 모니터 주사율만큼(120Hz보다 낮으면 120Hz) 채운 뒤 느리게 재생합니다. 확대 중 Alt+Shift+T로 시작하고 끝냅니다. 설정 창에서는 오른쪽 아래의 접힌 **슬로모션 테스트**를 펼쳐 주사율과 녹화 길이를 고르고 녹화할 수 있습니다. 재생 중에는 Alt+Shift+Space로 멈추고 Alt+Shift+←/→로 한 장씩 넘깁니다. 실제 지연과 끊김은 이 테스트로 알 수 없습니다.
 
 ### 3.5 RIFE 엔진
 
@@ -295,7 +295,7 @@ OpenScaler는 프레임 생성을 켜고 게임을 확대하는 동안 스스로
 | 허용 밝기 차이 | 앞뒤 프레임을 합칠 때 어느 정도 다른 픽셀까지 섞을지 | 0.08 |
 | 화면 지도 | 지도를 움직임 찾기에 쓸지 | 안 씀 |
 
-설정 창의 **게임별 학습** 구역에서 게임마다 보간과 외삽 각각의 채점 횟수, 설정을 바꾼 횟수, 기본값과 다른 값의 개수를 볼 수 있습니다. 점수 그래프는 지금 고른 방식의 것을 보여 줍니다 (보간은 두 장을 단순히 섞은 결과, 외삽은 앞 프레임을 그대로 둔 결과와 함께).
+설정 창의 **게임별 학습** 구역에서 게임마다 보간과 외삽 각각의 채점 횟수와 기본값과 다른 값의 개수를 볼 수 있고, 옆의 (?)에 설정을 바꾼 횟수와 학습된 값이 있습니다. 점수 그래프는 지금 고른 방식의 것을 보여 줍니다 (보간은 두 장을 단순히 섞은 결과, 외삽은 앞 프레임을 그대로 둔 결과와 함께).
 
 ### 5.2 효과
 
@@ -653,7 +653,7 @@ OpenScaler.exe --target "창 제목 일부" --mode 4 --sharp 0.5 --fg --duration
 | 테스트 | [`src/framegen_test.*`](src/framegen_test.cpp) | 자체 테스트 (`--fg-selftest`, `--fg-gaptest`, `--rife-bench`) |
 | | [`tools/test/`](tools/test) | 수동 테스트 스크립트 |
 | 도구 | [`tools/make_icon.ps1`](tools/make_icon.ps1), [`tools/rife_export.py`](tools/rife_export.py) | 로고와 아이콘 생성, RIFE 모델을 ONNX로 변환 |
-| 외부 코드 | [`third_party/`](third_party) | FSR 1.0 헤더, Dear ImGui 1.91.5, ONNX Runtime 헤더, Galmuri 글꼴 (모두 수정 없음) |
+| 외부 코드 | [`third_party/`](third_party) | FSR 1.0 헤더, Dear ImGui 1.91.5, ONNX Runtime 헤더, Neo둥근모 Pro 글꼴 (모두 수정 없음) |
 | 기타 | `assets/`, `docs/`, `.github/workflows/` | 로고와 아이콘, 스크린샷과 측정 기록, 자동 빌드와 배포 |
 
 ### 9.4 학습 데이터 올리기
@@ -672,9 +672,9 @@ PR을 열면 GitHub Actions가 파일 형식을 검사합니다. **이미 있는
 
 <img src="assets/logo.png" width="96" align="right" alt="로고">
 
-연분홍 배경 위의 하얀 행성 고리는 OpenScaler의 첫 글자 **O**를, 30도로 기울어진 진한 분홍색 선은 업스케일 전후의 경계를 뜻합니다. 선 왼쪽은 노이즈 낀 저해상도 이미지, 오른쪽은 선명한 이미지입니다. 로고와 exe 아이콘은 `tools/make_icon.ps1`로 만듭니다.
+연한 하늘색(#A6DAF4) 배경 위의 하얀 행성 고리는 OpenScaler의 첫 글자 **O**를, 30도로 기울어진 진한 하늘색(#00AFF0) 선은 업스케일 전후의 경계를 뜻합니다. 선 왼쪽은 노이즈 낀 저해상도 이미지, 오른쪽은 선명한 이미지입니다. 로고와 exe 아이콘은 `tools/make_icon.ps1`로 만듭니다.
 
-설정 창의 글꼴은 픽셀 글꼴 [Galmuri](https://github.com/quiple/galmuri)(SIL OFL 1.1)입니다. 옵션 이름은 Galmuri11 Bold, 설명 글은 Galmuri11 Condensed이며, 각진 모양을 유지하도록 12px의 정수 배 크기로만 그립니다.
+설정 창과 확대 화면 위 메뉴의 글꼴은 픽셀 글꼴 [Neo둥근모 Pro](https://neodgm.dalgona.dev/)(SIL OFL 1.1)입니다. 본문은 조금 작게(14px의 정수 배), 설명과 상태처럼 덜 중요한 글은 더 작게(12px의 정수 배) 그립니다. 색은 로고와 같은 두 하늘색으로, 구역 테두리는 연한 하늘색, 제목과 주요 버튼 같은 중요한 글은 진한 하늘색입니다.
 
 ---
 
@@ -700,4 +700,4 @@ PR을 열면 GitHub Actions가 파일 형식을 검사합니다. **이미 있는
 - `tools/rife_export.py`의 신경망 구조는 [Practical-RIFE](https://github.com/hzwer/Practical-RIFE)(MIT, Copyright (c) 2021 hzwer)를 옮긴 것입니다. 학습 모델도 같은 MIT로 공개되어 있습니다.
 - `src/shaders.h`의 Bicubic 함수는 MJP의 [Catmull-Rom 샘플링 코드](https://gist.github.com/TheRealMJP/c83b8c0f46b63f3a88a5986f4fa982b1)(MIT, Copyright (c) 2019 MJP)를 옮긴 것입니다. 라이선스 전문은 파일 맨 위에 있습니다.
 - 릴리스 zip의 `rife` 폴더에 든 ONNX Runtime은 Microsoft의 MIT 라이선스, RIFE 모델은 hzwer의 MIT 라이선스를 따릅니다. DirectML.dll은 오픈소스가 아니며, 앱과 함께 배포하는 것을 허용하는 Microsoft의 라이선스를 따릅니다. 각 라이선스와 고지는 폴더 안의 `LICENSE-*.txt`, `ThirdPartyNotices-*.txt`에 있습니다.
-- `third_party/galmuri`의 Galmuri11 Bold와 Galmuri11 Condensed는 이민서(quiple)의 저작물이며 SIL Open Font License 1.1을 따릅니다 ([third_party/galmuri/OFL.md](third_party/galmuri/OFL.md)). 원작자 설명에 따르면 이 두 글꼴의 글리프는 모두 원작자의 창작물이라, 다른 게임 글꼴의 저작권 문제 없이 쓸 수 있습니다.
+- `third_party/neodgm`의 Neo둥근모 Pro는 정은빈(Dalgona.)의 저작물이며 SIL Open Font License 1.1을 따릅니다 ([third_party/neodgm/OFL.txt](third_party/neodgm/OFL.txt)). 김중태 님이 퍼블릭 도메인으로 공개한 둥근모꼴을 바탕으로 만든 글꼴이며, 수정 없이 실행 파일에 넣어 씁니다.

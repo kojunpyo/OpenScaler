@@ -1,8 +1,8 @@
 ﻿# OpenScaler 로고와 아이콘 생성기
 #
 # 디자인
-#   - 연분홍 배경 위의 하얀 행성 고리 (OpenScaler의 첫 글자 O)
-#   - 가운데를 30도 기울어져 가로지르는 진한 분홍색 선
+#   - 연한 하늘색 배경 위의 하얀 행성 고리 (OpenScaler의 첫 글자 O)
+#   - 가운데를 30도 기울어져 가로지르는 진한 하늘색 선 (#00AFF0)
 #   - 선을 경계로 왼쪽은 노이즈 낀 저해상도 이미지, 오른쪽은 선명한 이미지 (업스케일 전/후)
 #
 # 출력
@@ -49,7 +49,7 @@ function SetPixels($bmp, $bytes) {
     $bmp.UnlockBits($data)
 }
 
-# 선명한 원본 그림: 연분홍 배경, 별, 행성 고리
+# 선명한 원본 그림: 연한 하늘색 배경(#A6DAF4 계열), 별, 행성 고리
 function DrawScene([int]$S) {
     $bmp = New-Object System.Drawing.Bitmap $S, $S, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -57,7 +57,7 @@ function DrawScene([int]$S) {
     $g.PixelOffsetMode = "HighQuality"
 
     $bg = New-Object System.Drawing.Drawing2D.LinearGradientBrush (New-Object System.Drawing.PointF 0, 0),
-        (New-Object System.Drawing.PointF 0, $S), (Hex "#FFE3EE"), (Hex "#F5AFC8")
+        (New-Object System.Drawing.PointF 0, $S), (Hex "#E2F3FC"), (Hex "#A6DAF4")
     $g.FillRectangle($bg, 0, 0, $S, $S)
 
     $stars = @(@(0.17, 0.19, 0.014), @(0.79, 0.15, 0.018), @(0.87, 0.63, 0.011), @(0.24, 0.81, 0.013),
@@ -69,11 +69,11 @@ function DrawScene([int]$S) {
     }
 
     # 하얀 행성 고리를 -20도 기울여 그린다.
-    # 연분홍 배경에서도 보이도록 바깥에 얇은 분홍 테두리를 먼저 그리고 그 위에 흰 고리를 겹친다.
+    # 연한 배경에서도 보이도록 바깥에 얇은 하늘색 테두리를 먼저 그리고 그 위에 흰 고리를 겹친다.
     $c = $S / 2.0
     $ringW = 0.76 * $S; $ringH = 0.32 * $S
     $ringWidth = [Math]::Max(1.5, 0.075 * $S)
-    $outlinePen = New-Object System.Drawing.Pen (Hex "#EE8FB0"), ([float]($ringWidth + [Math]::Max(1, 0.025 * $S)))
+    $outlinePen = New-Object System.Drawing.Pen (Hex "#6CC4EE"), ([float]($ringWidth + [Math]::Max(1, 0.025 * $S)))
     $ringPen = New-Object System.Drawing.Pen (Hex "#FFFFFF"), ([float]$ringWidth)
     $ringRect = New-Object System.Drawing.RectangleF ([float](-$ringW / 2)), ([float](-$ringH / 2)), ([float]$ringW), ([float]$ringH)
     $g.TranslateTransform([float]$c, [float]$c)
@@ -97,8 +97,8 @@ function MakeLogo([int]$S) {
     $rand = New-Object System.Random (1000 + $S)
     $blocks = [Math]::Ceiling($S / $block)
     $noise = New-Object int[] ($blocks * $blocks)
-    # 밝은 배경이라 어두운 쪽으로 더 흔들어야 노이즈가 보이고, 너무 세면 고리가 묻힌다
-    for ($i = 0; $i -lt $noise.Length; $i++) { $noise[$i] = $rand.Next(-26, 9) }
+    # 밝은 배경이라 어두운 쪽으로 더 흔들어야 노이즈가 보이고, 너무 세면 고리가 묻힌다 (2026-11-24 사용자 요청으로 세기를 반으로)
+    for ($i = 0; $i -lt $noise.Length; $i++) { $noise[$i] = $rand.Next(-13, 5) }
 
     # 경계선: 중심을 지나고 세로에서 30도 기울어진 선 (위쪽이 오른쪽으로)
     $angle = 30 * [Math]::PI / 180
@@ -119,7 +119,7 @@ function MakeLogo([int]$S) {
                 $j = $sy * $stride + $sx * 4
                 $n = $noise[$by * $blocks + $bx]
                 for ($k = 0; $k -lt 3; $k++) {
-                    $v = $clear[$j + $k] + $n + $rand.Next(-3, 4)
+                    $v = $clear[$j + $k] + $n + $rand.Next(-1, 3)
                     $out[$i + $k] = [byte][Math]::Max(0, [Math]::Min(255, $v))
                 }
             }
@@ -128,10 +128,10 @@ function MakeLogo([int]$S) {
     }
     SetPixels $scene $out
 
-    # 진한 분홍색 사선
+    # 진한 하늘색 사선
     $g = [System.Drawing.Graphics]::FromImage($scene)
     $g.SmoothingMode = "AntiAlias"
-    $linePen = New-Object System.Drawing.Pen (Hex "#D81B60"), ([float][Math]::Max(2, 0.07 * $S))
+    $linePen = New-Object System.Drawing.Pen (Hex "#00AFF0"), ([float][Math]::Max(2, 0.07 * $S))
     $len = 0.75 * $S
     $g.DrawLine($linePen, [float]($c - $dx * $len), [float]($c - $dy * $len), [float]($c + $dx * $len), [float]($c + $dy * $len))
     $g.Dispose()

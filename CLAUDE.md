@@ -39,7 +39,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 - `src/game_profile.*`: 게임별 프로필 (설정 자동 조정, 화면 지도, `profiles/*.json`)
 - `src/rife.*`: RIFE 실행 (실행 파일 옆 `rife` 폴더의 ONNX Runtime과 모델을 실행 중에 불러옴). `tools/rife_export.py`: 모델 변환
 - `src/fsr.hlsl`, `src/fsr_constants.*`: FSR 1.0. fxc로 빌드 때 컴파일
-- `third_party/`: fsr(MIT), imgui(MIT), galmuri(OFL 1.1), onnxruntime 헤더(MIT)
+- `third_party/`: fsr(MIT), imgui(MIT), neodgm(Neo둥근모 Pro, OFL 1.1), onnxruntime 헤더(MIT)
 - `tools/make_icon.ps1`: 로고와 아이콘 생성
 - `tools/profile_info.py`: 학습 데이터 요약, 비교, 형식 검사 (CI가 `shared-profiles/`를 검사). 공유 방법은 `docs/sharing-profiles.md`
 - `tools/test/`: 수동 테스트 스크립트 (`pmcompare.py`: PresentMon 기록으로 다른 확대 프로그램과 비교, `demoform.ps1`: README 시연 화면용 창, `devicecheck.ps1`: 다른 기기에서 기록 모으기, `fgtiming.py`/`fgquality.py`: README 평가 기준으로 등급 매기기)
@@ -75,12 +75,13 @@ Alt+Shift + S(시작/중지), M(모드), I(정수배), Up/Down(샤프닝), C(비
 ## 설정 창 디자인 (사용자 지정)
 
 - 흰 바탕, 각진 모서리, 두꺼운 픽셀 테두리, 언더테일 느낌. 구역 제목은 `* `로 시작하고 픽셀 하트를 쓴다.
-- 대상 창 구역은 분홍. 업스케일, 화면 표시 · 마우스, 단축키는 진하기가 다른 회색 (`kPinkPalette`, `kGrayPalette`).
-- 제목은 Open 연분홍, Scaler 진한 분홍.
-- 옵션 이름은 Galmuri11 Bold, 설명은 얇은 Galmuri11 Condensed. 글꼴은 12px의 정수 배로만 그린다.
-- Galmuri 일반체는 쓰지 않는다. 원작자 설명상 다른 글꼴에서 온 글리프가 섞여 있어, 전부 창작물인 Bold와 Condensed만 쓴다.
-- 설명 글꼴은 `kSecondaryTexts`와 `kModeDescriptions`에 있는 글자만 담는다. 새 설명 문구는 여기에 넣어야 글자가 깨지지 않는다.
-- 로고: 연분홍 배경, 하얀 행성 고리(O), 30도 기운 진한 분홍 선, 선 왼쪽은 노이즈, 오른쪽은 선명. 행성은 넣지 않는다.
+- 색은 하늘색 두 가지 (2026-11-24 사용자 지정): 연한 하늘색 `#A6DAF4`는 모든 구역 테두리, 진한 하늘색 `#00AFF0`은 제목과 주요 버튼 같은 중요한 글. 본문과 설명은 이 두 색에서 만든 조금 어두운 하늘색(`kSkyText`, `kSkySoft`)으로 읽히게 한다. 모든 구역이 같은 색 묶음(`kSkyPalette`)이다.
+- 제목은 Open 연한 하늘색, Scaler 진한 하늘색.
+- 글꼴은 Neo둥근모 Pro(`third_party/neodgm`, SIL OFL 1.1) 하나. 글꼴은 16px 기준이지만 사용자 요청(2026-11-24)으로 조금 작게 그린다: 본문과 옵션 이름 14px x P, 덜 중요한 글(설명, 상태, (?)와 도움말) 12px x P (`g_fontThin`), 제목 28px x P. 16px의 정수 배가 아니라 획 굵기가 조금 고르지 않은 것은 감수한다.
+- 기능 설명은 화면에 길게 쓰지 않고 (?) 도움말(`HelpMarker`, 구역 제목은 `BeginBox`의 help)로 넣는다. 화면에는 상태(fps, 영역, 녹화 진행 등)만 짧게 둔다.
+- 배치 (2026-11-24 사용자 지정): 머리말(로고, 제목, 버전 한 줄)과 대상 창은 가로 전체, 그 아래 두 열. 왼쪽 열은 업스케일, 프레임 생성, 단축키. 오른쪽 열은 게임별 학습, 화면 표시 · 마우스, 슬로모션 테스트. 단축키와 슬로모션 테스트는 기본으로 접혀 있고 같은 높이에서 시작한다 (`FoldHeader`, 두 줄 표의 둘째 줄). 프레임 생성과 화면 표시 · 마우스는 아랫단을 맞춘다 (짧은 쪽 상자를 지난 프레임에 잰 긴 쪽 아랫단까지 늘림, `BoxFit`). 설정 자동 저장 문구는 쓰지 않는다. 창이 좁으면(560 x P 미만) 한 열로, 확대 화면 위 메뉴도 한 열이다.
+- Neo둥근모 Pro에는 화살표(→←↑↓)와 ♥가 없다. 화면 글에는 `>`나 Up/Down처럼 글꼴에 있는 글자를 쓴다 (하트는 `DrawHeart`로 그린다).
+- 로고: 연한 하늘색 배경, 하얀 행성 고리(O), 30도 기운 진한 하늘색 선, 선 왼쪽은 노이즈(2026-11-24에 세기를 반으로), 오른쪽은 선명. 행성은 넣지 않는다. 확대 화면의 영역 편집 테두리와 안내 문구도 같은 하늘색과 글꼴이다.
 
 ## 테스트할 때 주의
 

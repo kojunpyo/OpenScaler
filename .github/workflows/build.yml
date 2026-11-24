@@ -83,7 +83,7 @@ jobs:
           Copy-Item tools/test/devicecheck.ps1 dist/OpenScaler/tools/
           Copy-Item third_party/fsr/license.txt dist/OpenScaler/LICENSE-AMD-FSR.txt
           Copy-Item third_party/imgui/LICENSE.txt dist/OpenScaler/LICENSE-ImGui.txt
-          Copy-Item third_party/galmuri/OFL.md dist/OpenScaler/LICENSE-Galmuri-OFL.md
+          Copy-Item third_party/neodgm/OFL.txt dist/OpenScaler/LICENSE-NeoDunggeunmo-OFL.txt
           Compress-Archive -Path dist/OpenScaler -DestinationPath dist/OpenScaler-windows-x64.zip
 
       - uses: actions/upload-artifact@v4

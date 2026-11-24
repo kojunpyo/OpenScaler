@@ -60,10 +60,10 @@ add_executable(OpenScaler WIN32
     ${SHADER_OUT}/PSEasu.h
     ${SHADER_OUT}/PSRcas.h)
 
-# 아이콘(assets)과 픽셀 글꼴(Galmuri, SIL OFL 1.1)은 리소스로 실행 파일 안에 넣는다.
-target_include_directories(OpenScaler PRIVATE ${SHADER_OUT} third_party/fsr third_party/onnxruntime assets third_party/galmuri)
+# 아이콘(assets)과 픽셀 글꼴(Neo둥근모 Pro, SIL OFL 1.1)은 리소스로 실행 파일 안에 넣는다.
+target_include_directories(OpenScaler PRIVATE ${SHADER_OUT} third_party/fsr third_party/onnxruntime assets third_party/neodgm)
 set_source_files_properties(src/openscaler.rc PROPERTIES OBJECT_DEPENDS
-    "${CMAKE_SOURCE_DIR}/assets/openscaler.ico;${CMAKE_SOURCE_DIR}/third_party/galmuri/Galmuri11-Bold.ttf;${CMAKE_SOURCE_DIR}/third_party/galmuri/Galmuri11-Condensed.ttf")
+    "${CMAKE_SOURCE_DIR}/assets/openscaler.ico;${CMAKE_SOURCE_DIR}/third_party/neodgm/NeoDunggeunmoPro-Regular.ttf")
 target_compile_definitions(OpenScaler PRIVATE UNICODE _UNICODE NOMINMAX OPENSCALER_VERSION="${PROJECT_VERSION}")
 target_compile_options(OpenScaler PRIVATE /utf-8 /W3 /EHsc /permissive-)
 target_link_options(OpenScaler PRIVATE /ENTRY:wmainCRTStartup)

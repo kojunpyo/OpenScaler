@@ -47,6 +47,7 @@
 #include "gui.h"
 #include "shaders.h"
 #include "fsr_constants.h"
+#include "resource.h"
 #include "PSEasu.h"  // 빌드 때 fxc가 만든 FSR 셰이더 바이트코드
 #include "PSRcas.h"
 
@@ -560,6 +561,21 @@ static int RegionHit(POINT p)
     return hit;
 }
 
+// 실행 파일에 넣은 픽셀 글꼴(Neo둥근모 Pro)을 이 프로세스에서만 쓸 수 있게 등록한다 (GDI로 쓰는 안내 문구용).
+static bool RegisterPixelFont()
+{
+    static int state = 0;  // 0: 아직, 1: 됨, 2: 실패
+    if (state == 0) {
+        state = 2;
+        HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_PIXEL_FONT), RT_RCDATA);
+        HGLOBAL mem = res ? LoadResource(nullptr, res) : nullptr;
+        void* data = mem ? LockResource(mem) : nullptr;
+        DWORD count = 0;
+        if (data && AddFontMemResourceEx(data, SizeofResource(nullptr, res), nullptr, &count)) state = 1;
+    }
+    return state == 1;
+}
+
 // 반투명 창을 픽셀마다 알파를 정해 다시 그린다 (미리 곱한 알파의 BGRA).
 static void RegionPaint()
 {
@@ -581,7 +597,8 @@ static void RegionPaint()
     const RECT& r = g_region.rc;
     const uint32_t kDim = 0x78000000;     // 영역 밖: 검정, 알파 120
     const uint32_t kInside = 0x01000000;  // 영역 안: 거의 투명 (알파가 0이면 클릭이 게임으로 간다)
-    const uint32_t kPink = 0xFFE0457Bu;   // 테두리: 진한 분홍 (설정 창의 Scaler 색)
+    const uint32_t kSky = 0xFF00AFF0u;    // 테두리: 진한 하늘색 (설정 창의 Scaler 색)
+    const uint32_t kSkyLight = 0xFFA6DAF4u;  // 안내 상자 테두리: 연한 하늘색
     const int border = 4;
     for (int y = 0; y < h; y++) {
         uint32_t* row = px + (size_t)y * w;
@@ -594,10 +611,10 @@ static void RegionPaint()
             for (int x = l; x < rr; x++) px[(size_t)y * w + x] = c;
     };
     // 두꺼운 테두리와 손잡이. 영역이 화면 끝에 닿아도 보이도록 영역 안쪽에 그린다.
-    fill(r.left, r.top, r.right, r.top + border, kPink);
-    fill(r.left, r.bottom - border, r.right, r.bottom, kPink);
-    fill(r.left, r.top, r.left + border, r.bottom, kPink);
-    fill(r.right - border, r.top, r.right, r.bottom, kPink);
+    fill(r.left, r.top, r.right, r.top + border, kSky);
+    fill(r.left, r.bottom - border, r.right, r.bottom, kSky);
+    fill(r.left, r.top, r.left + border, r.bottom, kSky);
+    fill(r.right - border, r.top, r.right, r.bottom, kSky);
     const int grip = 14;
     const int midX = (r.left + r.right) / 2, midY = (r.top + r.bottom) / 2;
     for (int gy : { (int)r.top + grip / 2, (int)r.bottom - grip / 2, midY })
@@ -605,22 +622,26 @@ static void RegionPaint()
             if (gx == midX && gy == midY) continue;
             const int cx = gx, cy = gy;
             fill(cx - grip / 2, cy - grip / 2, cx + grip / 2, cy + grip / 2, 0xFFFFFFFF);
-            fill(cx - grip / 2 + 3, cy - grip / 2 + 3, cx + grip / 2 - 3, cy + grip / 2 - 3, kPink);
+            fill(cx - grip / 2 + 3, cy - grip / 2 + 3, cx + grip / 2 - 3, cy + grip / 2 - 3, kSky);
         }
 
     // 안내 문구: 흰 상자에 GDI로 쓴 뒤, GDI가 지운 알파를 상자 안에서 다시 채운다.
     const wchar_t* text = L"테두리를 끌어 크기 조절 · 안쪽을 끌어 이동 · Enter 저장 · Esc 취소";
-    HFONT font = CreateFontW(-std::max(14, h / 60), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, NONANTIALIASED_QUALITY, 0, L"Malgun Gothic");
+    // 픽셀 글꼴은 16px의 정수 배로만 그린다 (1080p 이상이면 32px). 등록하지 못하면 맑은 고딕을 쓴다.
+    const bool pixel = RegisterPixelFont();
+    const int fontPx = pixel ? (h >= 1080 ? 32 : 16) : std::max(14, h / 60);
+    HFONT font = CreateFontW(-fontPx, 0, 0, 0, pixel ? FW_NORMAL : FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, NONANTIALIASED_QUALITY, 0,
+                             pixel ? L"NeoDunggeunmo Pro" : L"Malgun Gothic");
     HGDIOBJ oldFont = SelectObject(dc, font);
     SIZE ts{};
     GetTextExtentPoint32W(dc, text, (int)wcslen(text), &ts);
     RECT box = { (w - ts.cx) / 2 - 12, 16, (w + ts.cx) / 2 + 12, 16 + ts.cy + 12 };
     if (box.bottom + 8 > r.top && box.top < r.bottom && box.right > r.left && box.left < r.right && r.bottom + box.bottom + 24 < h)
         OffsetRect(&box, 0, h - box.bottom - 16);  // 영역과 겹치면 아래로 옮긴다
-    fill(box.left - 3, box.top - 3, box.right + 3, box.bottom + 3, kPink);
+    fill(box.left - 3, box.top - 3, box.right + 3, box.bottom + 3, kSkyLight);
     fill(box.left, box.top, box.right, box.bottom, 0xFFFFFFFF);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(0, 0, 0));
+    SetTextColor(dc, RGB(0x00, 0xAF, 0xF0));  // 진한 하늘색
     GdiFlush();
     TextOutW(dc, box.left + 12, box.top + 6, text, (int)wcslen(text));
     GdiFlush();
