@@ -646,7 +646,10 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
             block += blockResult.psnr;
             estMs += blockResult.estimateMs;
             synMs += blockResult.synthMs;
-            if (save) SaveBmp(name + L"block.bmp", fg.TestReadOutput(), w, h);
+            if (save) {
+                SaveBmp(name + L"block.bmp", fg.TestReadOutput(), w, h);
+                SaveBmp(name + L"flow.bmp", fg.TestReadVisualize(1, 2, defaults, t), w, h);  // 움직임 시각화 (README 그림용)
+            }
             blockLong += fg.TestSynthPsnr(1, 2, 3, t, longGap, false, kStep * c.gap).psnr;
             if (save) SaveBmp(name + L"block_longgap.bmp", fg.TestReadOutput(), w, h);
             if (rifeOk) {
