@@ -1605,6 +1605,11 @@ static void UpdateGpuPriority()
         printf("\n[GPU 우선순위] %d (2 보통, 5 실시간)\n", wanted);
 }
 
+// 확대 화면을 그리는 중(확대 화면 위 메뉴 포함)에 확대 중지를 누르면 그리던 상태(g_scaling)를 지우면 안 되므로,
+// 그 프레임을 다 그린 뒤에 멈춘다. 바로 지우면 RenderFrame이 지운 상태로 Present를 불러 프로그램이 죽었다.
+static bool g_inRenderFrame = false;
+static bool g_stopAfterFrame = false;
+
 static void RenderFrame()
 {
     auto s = g_scaling;
@@ -2022,7 +2027,11 @@ void AppSettingsChanged()
 }
 
 void AppStartScaling(HWND target) { StartScaling(target); }
-void AppStopScaling() { StopScaling(); }
+void AppStopScaling()
+{
+    if (g_inRenderFrame) g_stopAfterFrame = true;  // 확대 화면 위 메뉴의 "확대 중지": 이 프레임을 다 그린 뒤에 멈춘다
+    else StopScaling();
+}
 void AppSlowMoToggle(double delaySeconds) { SlowMoToggle(delaySeconds); }
 void AppRegionEditBegin() { RegionEditBegin(); }
 void AppRegionEditEnd(bool save) { RegionEditEnd(save); }
@@ -2413,7 +2422,13 @@ int wmain(int argc, wchar_t** argv)
                 }
                 // 이전 프레임이 화면에 표시될 때까지 기다린 뒤, 가장 최신 캡처와 커서 위치로 그린다.
                 WaitForSingleObjectEx(g_scaling->frameWaitable, 100, TRUE);
+                g_inRenderFrame = true;
                 RenderFrame();
+                g_inRenderFrame = false;
+                if (g_stopAfterFrame) {
+                    g_stopAfterFrame = false;
+                    StopScaling();
+                }
                 PrintStatus();
                 if (regionEditAuto && g_scaling && g_scaling->layoutValid) {
                     RegionEditBegin();
