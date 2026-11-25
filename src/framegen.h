@@ -352,6 +352,8 @@ private:
     std::deque<RifeReadback> m_rifeReadbacks;
     std::deque<std::pair<long long, double>> m_rifeTimes;  // 게임 프레임 번호와 캡처 시각 (결과의 지연을 재려고)
     std::deque<double> m_acceptLags, m_rifeLags;            // 최근 지연 (초)
+    std::deque<double> m_captureLeads;                      // 캡처 시각이 넘긴 시각보다 앞선 정도 (초, 외삽 표시 시계용)
+    double m_captureLead = 0;
     double m_rifeLagMedianMs = 0;
     bool m_realtime = false;
     Incoming m_incoming;

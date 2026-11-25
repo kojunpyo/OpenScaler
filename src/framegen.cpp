@@ -184,6 +184,8 @@ void FrameGen::Reset()
     m_rifeTimes.clear();
     m_acceptLags.clear();
     m_rifeLags.clear();
+    m_captureLeads.clear();
+    m_captureLead = 0;
     m_stats.acceptLagMs = m_stats.rifeLagMs = 0;
     m_rifeLagMedianMs = 0;
     m_incoming = Incoming();
@@ -915,6 +917,15 @@ void FrameGen::PushFrame(ID3D11Texture2D* source, UINT w, UINT h, double time, c
     m_incoming.waiting = true;
     m_incoming.time = time;
     m_incoming.pushed = Seconds();
+    if (m_realtime) {
+        // Windows.Graphics.Capture의 캡처 시각은 그 장면이 화면에 표시될 시각이라 넘기는 지금보다 한 화면쯤 앞설 수 있다.
+        // 외삽은 표시 시계를 지금에 두므로, 이만큼 앞서지 않으면 최신 프레임 시각에 겨우 닿아 앞으로 나가지 못한다.
+        m_captureLeads.push_back(time - m_incoming.pushed);
+        if (m_captureLeads.size() > kLagSamples) m_captureLeads.pop_front();
+        std::vector<double> sorted(m_captureLeads.begin(), m_captureLeads.end());
+        std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+        m_captureLead = sorted[sorted.size() / 2];
+    }
     m_incoming.options = options;
     m_incoming.staging = m_count > 0 ? QueueDuplicate(incoming, m_frames[0]) : nullptr;
     if (!m_realtime) {
@@ -1242,7 +1253,7 @@ ID3D11ShaderResourceView* FrameGen::RenderRegion(double now, const FgOptions& op
 
     // 표시 시계: 캡처 시각의 흔들림이 화면에 그대로 나타나지 않도록 천천히 따라간다.
     const bool extrapolate = options.method == FG_METHOD_EXTRAPOLATE;
-    double delay = extrapolate ? 0.0 : m_interval + kDisplayMargin;
+    double delay = extrapolate ? -std::clamp(m_captureLead, 0.0, m_interval) : m_interval + kDisplayMargin;
     // RIFE 결과를 기다릴 시간만큼 화면을 더 늦춘다. 지연이 그만큼 늘어난다.
     // 결과가 프레임 간격 안에 나올 때만 늦춘다. 그보다 느리면 어차피 블록 매칭으로 보여 주므로 지연만 늘어난다.
     // 실시간에서는 캡처부터 결과가 나올 때까지 잰 시간을 쓴다 (GPU에서 입력을 읽어 오는 시간도 들어 있다).
