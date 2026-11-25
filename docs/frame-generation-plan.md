@@ -811,6 +811,21 @@ DJMAX는 60fps로 돌아가므로, 곡을 플레이하는 동안 슬로모션 �
 - 같은 실행의 RIFE(재생 창, DJMAX 끔, 네 번): 표시 59.8~60.0, 끊김 분당 3.3~10번, 14.9~15.9ms. README DJMAX 표의 RIFE 줄.
 - PresentMon 주의: 앞서 띄운 세션이 남아 있으면 프로세스는 떠 있는데 기록 파일이 생기지 않았다. 관리자 cmd 하나로 `taskkill`, `logman stop PM60~PM65 -ets`, PresentMon 실행(출력을 파일로)을 함께 돌려 해결했다 (UAC 한 번).
 
+## 마인크래프트 60Hz Lossless Scaling 비교 다시 재기 (2026-11-25, 1.5.3)
+
+처음 비교(20:47)는 OpenScaler가 화면 합성을 거치던 환경이라 Present->표시가 32~49ms로 불리하게 나왔다. OBS와 Wallpaper Engine을 끄고 Lossless Scaling만 보통 권한으로 띄운 채 다시 쟀다 (마인크래프트 30fps, 렌더 거리 8, 고정 2배, 번갈아 세 번, 20초씩, PresentMon. 열 제한 표본 2개/420개).
+
+| 구간 | 표시 | 끊김 (분당) | Present->표시 | 표시 방식 |
+|---|---|---|---|---|
+| Lossless Scaling 고정 2배 | 58.1~58.5 | 87~110 | 5.9~10.7ms | Independent Flip, SyncInterval 0 |
+| OpenScaler 블록 매칭 | 59.9~60.0 | 0~3.3 | 15.7ms | Independent Flip 100% |
+| OpenScaler RIFE | 59.8~59.9 | 3.3~10 | 15.4~15.5ms | Independent Flip 99.9% |
+| OpenScaler 블록 매칭, OBS(보통 권한) 띄움 | 60.0 | 0 | 15.7~15.8ms | Independent Flip 97~99% |
+| OpenScaler 블록 매칭, OBS 닫은 뒤 | 60.0 | 0 | 15.7ms | Independent Flip 100% |
+
+- README 6.2.1 표를 이 값으로 바꿨다. 처음 비교 결과는 위 "60Hz 30fps, Lossless Scaling과 비교"에 남겼다.
+- Lossless Scaling을 켜 두기만 하거나 보통 권한 OBS를 띄워 두는 것으로는 합성되지 않았다. 처음 비교 때 달랐던 것: OBS가 관리자 권한이었고 게임 캡처로 Lossless Scaling에 훅을 걸어 두었음, Wallpaper Engine, Lossless Scaling도 관리자 권한, 렌더 거리 32. 이 중 무엇이 원인인지는 가려내지 않았다.
+
 ## 화면 기준 끊김 (2026-11-23, 1.3.10)
 
 PresentMon으로 화면에 실제로 표시된 간격을 보니 끊김이 `--fg-log`(OpenScaler가 화면을 낸 간격)보다 1.5~2배 많았다. 끊김을 "Present가 늦음"(자체 기록에도 잡힘)과 "Present는 제때인데 표시가 늦음"으로 나누면 절반쯤이 뒤쪽이고, 그 화면들은 PresentMon의 GPU 시간이 7~12ms였다. GPU 작업이 늦게 끝나 DWM 합성이 한 칸 뒤에 표시한 것으로 본다. 장면을 낸 뒤 표시까지는 실행마다 13ms 또는 20ms로 갈렸다 (합성 주기와의 위상).
