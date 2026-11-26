@@ -1,0 +1,68 @@
+name: 버그 제보
+description: 프로그램이 죽거나, 화면이 이상하거나, 설명과 다르게 동작할 때
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        제보해 주셔서 고맙습니다. 먼저 README의 [3.7 문제 해결](https://github.com/kojunpyo/OpenScaler#37-문제-해결)에 같은 증상이 있는지 확인해 주세요.
+        화면 캡처나 로그에 개인 정보(창 제목의 이름, 경로 등)가 있으면 지우고 올려 주세요.
+  - type: textarea
+    id: what
+    attributes:
+      label: 무슨 일이 있었나요
+      description: 어떤 증상인지, 원래 어떻게 되어야 한다고 생각하는지 적어 주세요.
+      placeholder: 예) 프레임 생성을 켜고 확대하면 3초 뒤 프로그램이 꺼집니다.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 다시 일으키는 순서
+      description: 처음부터 증상이 나올 때까지 무엇을 했는지 순서대로 적어 주세요.
+      placeholder: |
+        1. 게임을 1280x720 창 모드로 실행
+        2. 설정 창에서 대상 창을 고르고 확대 시작
+        3. Alt+Shift+F로 프레임 생성 켜기
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OpenScaler 버전
+      description: 설정 창 맨 위 제목 옆에 있습니다.
+      placeholder: 예) v1.5.4
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: 게임과 게임 창 크기
+      placeholder: 예) Minecraft Java 26.3, 854x480, 최대 프레임률 30
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: 쓰던 설정
+      description: 업스케일 방식, 프레임 생성 방식(블록 매칭 보간 / RIFE 보간 / 블록 매칭 외삽), 배수, 프레임 생성 영역을 지정했는지 등
+      placeholder: 예) FSR 1.0, 샤프닝 0.5, 블록 매칭 보간, 배수 자동, 영역 지정함
+  - type: textarea
+    id: system
+    attributes:
+      label: 컴퓨터 환경
+      description: Windows 버전, 그래픽카드, 모니터 주사율과 배율(여러 대면 모두), 함께 켜 둔 프로그램(OBS, 배경화면 프로그램, 다른 확대 프로그램 등)
+      placeholder: |
+        Windows 10 22H2, GeForce GTX 1060
+        주 모니터 1920x1080 60Hz 125%, 보조 모니터 1920x1080 60Hz 100%
+        OBS를 함께 켜 둠
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 로그와 화면
+      description: |
+        `OpenScaler.exe --console`로 실행하면 로그 창이 열립니다. 증상이 나올 때의 마지막 몇 줄을 붙여 주세요.
+        화면이 이상하면 캡처나 짧은 영상을 끌어다 놓아 주세요.
+      render: text

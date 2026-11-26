@@ -1,0 +1,28 @@
+name: 기능 제안
+description: 새 기능이나 지금 기능을 바꾸자는 제안
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 어떤 점이 불편한가요
+      description: 어떤 게임에서 무엇을 하려다 어디서 막혔는지 적어 주세요. 해결책보다 상황이 더 도움이 됩니다.
+      placeholder: 예) 조준점이 있는 1인칭 게임에서 프레임 생성을 켜면 조준점 주변이 흔들립니다.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 제안하는 방법
+      description: 이렇게 되면 좋겠다는 동작을 적어 주세요. 다른 프로그램에서 본 방식이 있으면 함께 알려 주세요.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 지금 쓰는 우회 방법
+      description: 지금은 어떻게 해결하고 있는지, 다른 설정으로 비슷하게 되는지 적어 주세요.
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: 함께하기
+      options:
+        - label: 이 기능을 직접 구현해 PR을 올려 볼 생각이 있습니다

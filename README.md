@@ -791,6 +791,8 @@ flowchart TD
 
 ## 9. 개발과 기여
 
+버그 제보, 기능 제안, 다른 기기에서 잰 결과, 코드 수정 모두 환영합니다. 이슈와 PR을 올리는 방법, 확인할 것, 코드와 문서 규칙은 [CONTRIBUTING.md](CONTRIBUTING.md)에 정리했습니다.
+
 ### 9.1 직접 빌드하기
 
 필요한 것: Visual Studio 2022 이상 ("C++를 사용한 데스크톱 개발" 워크로드), Windows 10 SDK, CMake

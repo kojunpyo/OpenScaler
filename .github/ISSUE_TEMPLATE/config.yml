@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 사용법과 문제 해결 (README)
+    url: https://github.com/kojunpyo/OpenScaler#3-설치와-사용법
+    about: 설치, 단축키, 자주 묻는 문제의 해결 방법은 README 3장에 있습니다.
+  - name: 학습 데이터 공유
+    url: https://github.com/kojunpyo/OpenScaler#94-학습-데이터-올리기
+    about: 잘 학습된 게임별 데이터는 이슈 대신 shared-profiles 폴더에 PR로 올려 주세요.
