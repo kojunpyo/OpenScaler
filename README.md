@@ -524,6 +524,8 @@ dB(PSNR)도 함께 적습니다. 숫자가 감이 오지 않으면 픽셀 하나
 
 - "-"는 Lossless Scaling과 같은 조건으로 재지 않은 칸입니다. 60fps → 144fps의 RIFE는 이 노트북(GTX 1060)에서 144Hz를 따라가지 못했습니다 ([8. 알려진 한계](#8-알려진-한계)).
 
+![요약 그래프: Lossless Scaling을 100%로 둔 끊김, 표시까지 걸린 시간, 오차 감소율 (마인크래프트)](docs/perf_summary.png)
+
 **표 읽는 법**
 
 - Lossless Scaling과 같은 조건으로 번갈아 잰 항목은 **Lossless Scaling을 100%로 둔 상댓값 (실제 수치)** 으로 적습니다. 범위로 잰 값은 가운데 값끼리 나눴습니다.
@@ -564,6 +566,14 @@ dB(PSNR)도 함께 적습니다. 숫자가 감이 오지 않으면 픽셀 하나
 - OpenScaler는 거의 모든 화면에 새 장면을 냈고, Lossless Scaling은 초당 1.5장쯤 놓쳐 분당 100번 안팎 끊겼습니다.
 - 화면에 나오기까지는 OpenScaler가 한 칸(15.7ms)으로 Lossless Scaling보다 5\~10ms 늦었습니다. 둘 다 Windows 화면 합성을 건너뛰는 하드웨어 독립 플립으로 표시됐고, Lossless Scaling은 수직 동기화를 기다리지 않고 바로 내서 더 빠릅니다.
 - 다른 프로그램을 끄고 Lossless Scaling만 보통 권한으로 켜 둔 채 쟀습니다 (마인크래프트 렌더 거리 8). 처음 잰 날에는 관리자 권한 OBS와 Wallpaper Engine 등이 함께 떠 있었고, 그때는 OpenScaler의 화면이 모두 화면 합성을 거쳐 표시까지 32\~49ms가 걸렸습니다.
+
+![화면 표시 간격 (60Hz): OpenScaler와 Lossless Scaling이 새 장면을 낸 간격, 3초 구간](docs/present_interval_60hz.png)
+
+> 위 표의 PresentMon 기록(두 번째 실행)에서, 끊김 수가 그 실행의 평균에 가장 가까운 3초를 골랐습니다. 점이 한 칸(16.7ms)에 모여 있으면 고르게 나온 것이고, 끊김 기준(25ms) 위의 큰 점은 장면이 한 칸 늦게 바뀐 끊김입니다. 같은 3초에 OpenScaler는 0번, Lossless Scaling은 5번 끊겼습니다.
+
+![표시까지 걸린 시간: Lossless Scaling은 바로, OpenScaler는 다음 화면 갱신에, 화면 합성을 거치면 한 칸 더 늦게 화면에 나온다](docs/display_latency.png)
+
+> 장면을 낸 순간(●)부터 화면에 나올 때(◆)까지를 60Hz 기준으로 그린 개념도입니다. OpenScaler는 수직 동기화로 다음 화면 갱신에 맞춰 올려 한 칸쯤 걸리고, Lossless Scaling은 기다리지 않고 바로 올려 더 빠릅니다. 다른 프로그램 때문에 Windows 화면 합성을 거치면 한 칸이 더 붙습니다.
 
 OpenScaler 방식별 세부 (60Hz, 자체 기록, 방식마다 세 번, 1.5.3):
 
