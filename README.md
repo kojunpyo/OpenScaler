@@ -272,9 +272,9 @@ FgPreset=0            ; 화면 지도. 0: 자동, 1: 끔
 | Lanczos2 | sinc 함수 기반 4×4 보간 + 링잉 억제 | 일반 게임 |
 | FSR 1.0 | AMD의 EASU가 윤곽선 방향을 분석해 보간하고, RCAS로 샤프닝. 윤곽선이 가장 깔끔함 | 일반 게임 (기본값) |
 
-640×360 테스트 패턴을 1920×1080(3배)으로 확대한 결과입니다.
+게임 대사 화면을 360×209로 줄여 창에 띄우고, 1920×1080(약 5.2배)으로 확대한 화면에서 대사 부분을 잘랐습니다 (Lanczos2와 FSR 1.0은 샤프닝 0.5). Nearest는 픽셀이 계단처럼 보이고, Lanczos2와 FSR 1.0은 글자 윤곽이 매끄럽게 이어집니다. (배경 이미지: UNDERTALE © Toby Fox)
 
-![업스케일 알고리즘 비교: Nearest, Lanczos2, FSR 1.0](docs/compare_modes.png)
+![업스케일 알고리즘 비교: 같은 게임 대사를 Nearest, Lanczos2, FSR 1.0으로 확대한 결과](docs/compare_modes.png)
 
 </details>
 
