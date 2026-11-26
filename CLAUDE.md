@@ -32,7 +32,7 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 
 - `src/main.cpp`: 캡처(Windows.Graphics.Capture), 오버레이 창, D3D11 렌더링, 커서 좌표 변환과 속도 보정, 설정 파일, 단축키, 메인 루프
 - `src/app.h`: main.cpp와 gui.cpp가 함께 쓰는 설정과 기능
-- `src/gui.cpp`: 설정 창 (Dear ImGui 1.91.5). 확대 화면 위 메뉴(Alt+Shift+G)도 그린다: ImGui 컨텍스트를 하나 더 두고 글꼴 아틀라스를 함께 쓰며, 설정 구역은 `DrawSettingsBoxes`를 같이 쓴다. 메뉴 입력은 Win32 백엔드 없이 오버레이 창 프로시저가 `GuiOverlayMouse`로 넘긴다
+- `src/gui.cpp`: 설정 창 (Dear ImGui 1.91.5). 확대 화면 위 메뉴(Alt+Shift+M)도 그린다: ImGui 컨텍스트를 하나 더 두고 글꼴 아틀라스를 함께 쓰며, 설정 구역은 `DrawSettingsBoxes`를 같이 쓴다. 메뉴 입력은 Win32 백엔드 없이 오버레이 창 프로시저가 `GuiOverlayMouse`로 넘긴다
 - `src/shaders.h`: 실행 중에 컴파일하는 HLSL (업스케일, 샤프닝, 커서)
 - `src/framegen.*`, `src/framegen_shaders.h`: 프레임 생성 (움직임 추정, 합성, 표시 시점, 채점)
 - `src/framegen_test.*`: 프레임 생성 자체 테스트 (`--fg-selftest 폴더`, 화면과 마우스를 쓰지 않음). RIFE 속도는 `--rife-bench 폴더`, 영역 결과는 `--fg-regiontest 폴더`, 영역 계산 시간은 `--fg-regionbench 덤프 폴더 [x,y,w,h]`
@@ -69,8 +69,8 @@ cmd /c "chcp 949 >nul && `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cm
 
 ## 사용 중인 단축키
 
-Alt+Shift + S(시작/중지), M(모드), I(정수배), Up/Down(샤프닝), C(비교), O(상태 표시), P(커서 속도), F(프레임 생성), T(슬로모션 테스트), G(확대 화면 위 메뉴), Q(종료).
-슬로모션 재생 중에만 Space(멈춤), Left/Right(한 장씩)를 등록한다. 이 PC에서 Alt+Shift+R은 다른 프로그램이 이미 쓰고 있어 등록되지 않는다.
+Alt+Shift + S(시작/중지), M(확대 화면 위 메뉴, 2026-11-26에 G에서 바꿈. Menu의 M), F(프레임 생성), Q(종료). 2026-11-26에 사용자 요청으로 M(알고리즘 변경), I(정수배), Up/Down(샤프닝), C(비교), O(상태 표시), P(커서 속도), T(슬로모션 테스트)를 없앴다 (설정 창과 메뉴에서 바꿈). 메뉴를 닫으면 "Alt+Shift+M을 누르면 메뉴를 다시 열 수 있어요"를 3.5초 띄운다 (`g_menuHintUntil`, `MenuHintBanner`).
+슬로모션 재생 중에만 Space(멈춤), Left/Right(한 장씩)를 등록한다. 슬로모션 끝내기는 설정 창이나 메뉴의 버튼으로 한다. 이 PC에서 Alt+Shift+R은 다른 프로그램이 이미 쓰고 있어 등록되지 않는다.
 
 ## 설정 창 디자인 (사용자 지정)
 
@@ -89,7 +89,7 @@ Alt+Shift + S(시작/중지), M(모드), I(정수배), Up/Down(샤프닝), C(비
 - PowerShell 5에서 한글이 든 스크립트는 UTF-8 BOM으로 저장해야 한다.
 - 커서 테스트는 실제 마우스를 움직이고, 사용자가 마우스를 움직이면 결과가 흐트러진다.
 - 커서 속도 테스트는 Windows 마우스 속도를 잠시 바꾸므로 끝나면 원래 값을 확인한다.
-- 슬로모션 테스트는 `tools/test/slowmorun.ps1`로 실행한다. 단축키 시험에서 Alt+Shift+O가 슬로모션 재생 밖에서 눌리면 `build\OpenScaler.ini`의 값이 바뀌므로 끝나면 확인한다.
+- 슬로모션 테스트는 `tools/test/slowmorun.ps1`로 실행한다. 단축키 시험에서 Alt+Shift+F를 누르면 `build\OpenScaler.ini`의 값이 바뀌므로 끝나면 확인한다.
 - `--fg-log`로 잴 때는 OpenScaler가 끝날 때까지 화면을 계속 움직인다. 2026-11-23에 시점 돌리기를 먼저 멈춰, 끝 1~2초의 멈춘 화면이 "멈춤 14~24%, 게임 46~52fps"로 잡혔다 (실제는 0~4%, 59fps).
 - PresentMon은 `--timed`가 지나 기록을 마친 뒤에도 프로세스와 ETW 세션이 남는다. 측정이 끝나면 정리한다. 쌓이면 "error code 1450"으로 시작하지 못한다. 관리자 권한으로 `taskkill /f /im PresentMon.exe`, `logman query -ets`에 보이는 PM 세션을 `logman stop 이름 -ets`로 정리한다.
 - PresentMon을 다시 띄울 때 앞 세션이 남아 있으면 프로세스는 떠 있는데 기록 파일이 생기지 않는다. 관리자 cmd 하나로 세션 정지 -> `taskkill` -> 3초 대기 -> 세션 다시 정지 -> PresentMon 실행(출력을 파일로)을 돌리면 UAC 한 번으로 된다 (2026-11-25). 강제로 끝낸 기록은 마지막 줄이 잘리므로 빼고 분석한다. 끝날 때까지 기록 파일이 잠겨 있으니 `--timed`는 측정 길이에 맞게 짧게 준다.

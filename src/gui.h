@@ -31,6 +31,7 @@ struct OverlayView {
     int prompt = OVERLAY_PROMPT_NONE;
     double seconds = 0, needSeconds = 10;  // 계산 중: 모은 시간과 필요한 시간
     bool still = false;              // 계산 중: 화면이 거의 움직이지 않는다
+    float menuHint = 0;              // 메뉴를 닫은 뒤 "다시 여는 단축키" 안내의 진하기 (0이면 그리지 않음)
 };
 // 돌려주는 값은 OverlayAction (누른 버튼)
 int GuiOverlayRender(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11RenderTargetView* rtv, int width, int height,

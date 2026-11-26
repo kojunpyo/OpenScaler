@@ -18,11 +18,7 @@ $form = Start-Process powershell -ArgumentList "-NoProfile -WindowStyle Hidden -
 Start-Sleep 4
 $os = Start-Process "$dir\OpenScaler.exe" -ArgumentList "--target OSPattern --duration 5" -RedirectStandardOutput "$dir\run1.txt" -PassThru -NoNewWindow
 Start-Sleep 2
-[K]::Hotkey(0x4D)   # Alt+Shift+M : FSR 1.0 -> Nearest
-Start-Sleep -Milliseconds 300
-[K]::Hotkey(0x26)   # Alt+Shift+Up : 샤픈 0.5 -> 0.6
-Start-Sleep -Milliseconds 300
-[K]::Hotkey(0x49)   # Alt+Shift+I : 정수배 ON
+[K]::Hotkey(0x46)   # Alt+Shift+F : 프레임 생성 켜기/끄기 (남은 단축키 중 설정을 바꾸는 것)
 $os.WaitForExit(10000) | Out-Null
 $form.Kill()
 "--- run1 (hotkeys) ---"

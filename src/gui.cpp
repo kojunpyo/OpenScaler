@@ -173,15 +173,16 @@ const char* kRegionAdviceStill = "화면이 거의 움직이지 않았어요. �
 const char* kRegionAdviceEverywhere = "화면 대부분이 움직여서 좁힐 곳이 없어요";
 const char* kRegionRecommendHelp = "최근 10초 동안 자주 바뀐 곳을 감싸 영역 편집 창에 그려 줘요. 테두리를 다듬고 Enter로 저장하면 돼요.";
 const char* g_regionAdvice = nullptr;  // 영역 추천을 하지 못한 까닭
-const char* kOverlayHint = "Alt+Shift+G로 열고 닫아요. 메뉴가 열려 있는 동안에는 마우스로 메뉴만 누를 수 있고, 게임 키보드 입력은 그대로예요.";
+const char* kOverlayHint = "Alt+Shift+M으로 열고 닫아요. 메뉴가 열려 있는 동안에는 마우스로 메뉴만 누를 수 있고, 게임 키보드 입력은 그대로예요.";
 const char* kOverlayShareNote = "학습 데이터 내보내기와 가져오기는 설정 창에서 할 수 있어요.";
 const char* kOverlayCaptureNote = "1인칭 게임처럼 커서를 붙잡아 두는 게임은 게임 메뉴(Esc)를 먼저 열어야 메뉴를 누를 수 있어요.";
 // 확대를 시작하면 묻는 팝업 (문구는 사용자가 정함)
 const char* kAskRegionTitle = "프레임 생성 영역을 지정할까요?";
 const char* kAskRegionDesc = "(리듬게임 등 특정 영역만이 필요한 게임의 성능이 개선됩니다. 언제든 영역을 다시 지정할 수 있습니다.)";
 const char* kComputingTitle = "추천 영역 계산 중...";
-const char* kComputingFormat = "게임을 계속하면 자주 움직이는 곳을 찾아요 (%.0f / %.0f초) · Alt+Shift+G: 취소";
-const char* kComputingStill = "화면이 거의 움직이지 않아요. 게임을 플레이해 주세요 · Alt+Shift+G: 취소";
+const char* kComputingFormat = "게임을 계속하면 자주 움직이는 곳을 찾아요 (%.0f / %.0f초) · Alt+Shift+M: 취소";
+const char* kComputingStill = "화면이 거의 움직이지 않아요. 게임을 플레이해 주세요 · Alt+Shift+M: 취소";
+const char* kMenuHint = "Alt+Shift+M을 누르면 메뉴를 다시 열 수 있어요";
 const char* kEverywhereTitle = "좁힐 곳을 찾지 못했어요";
 const char* kEverywhereDesc = "화면 대부분이 움직여서 영역을 줄여도 이득이 없어요. 필요하면 직접 지정할 수 있어요.";
 const char* kLearnGainFormat = "%s 최근 채점 %d회 평균, 기준보다 %+.1f dB";
@@ -190,15 +191,8 @@ const char* kShareDesc = "잘 학습된 데이터를 파일로 주고받을 수 
 
 const char* kHotkeys[][2] = {
     { "Alt+Shift+S", "확대 시작/중지" },
-    { "Alt+Shift+M", "알고리즘 변경" },
-    { "Alt+Shift+Up/Down", "샤프닝 조절" },
-    { "Alt+Shift+I", "정수배 스케일링" },
-    { "Alt+Shift+C", "비교 모드" },
-    { "Alt+Shift+O", "상태 표시 항상 켜기" },
-    { "Alt+Shift+P", "커서 속도 보정" },
+    { "Alt+Shift+M", "확대 화면 위 메뉴" },
     { "Alt+Shift+F", "프레임 생성" },
-    { "Alt+Shift+T", "슬로모션 테스트" },
-    { "Alt+Shift+G", "확대 화면 위 메뉴" },
     { "Alt+Shift+Q", "종료" },
 };
 
@@ -1204,7 +1198,7 @@ void DrawUi()
             char fps[64];
             snprintf(fps, sizeof(fps), kFpsFormat, status.outputFps, status.captureFps);
             Description(fps);
-            HelpMarker("확대 화면이 이 창을 가리면 Alt+Shift+G로 확대 화면 위에 메뉴를 띄우거나, Alt+Shift+S로 중지할 수 있어요.");
+            HelpMarker("확대 화면이 이 창을 가리면 Alt+Shift+M으로 확대 화면 위에 메뉴를 띄우거나, Alt+Shift+S로 중지할 수 있어요.");
         } else {
             ImGui::TextUnformatted("대기 중");
             HelpMarker("게임을 창 모드로, 모니터보다 낮은 해상도로 실행한 뒤 위 목록에서 고르세요.\n"
@@ -1348,6 +1342,30 @@ void ComputingBanner(const OverlayView& view)
     ImGui::End();
 }
 
+// 메뉴를 닫은 뒤 다시 여는 단축키를 잠깐 알려 준다: 화면 위쪽 가운데, 누를 수 없고 끝에서 흐려진다.
+void MenuHintBanner(float alpha)
+{
+    const float u = (float)P;
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::clamp(alpha, 0.0f, 1.0f));
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 12 * u), ImGuiCond_Always, ImVec2(0.5f, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2 * u);
+    ImGui::PushStyleColor(ImGuiCol_Border, kSky);
+    ImGui::Begin("##menuhint", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    const float lineH = ImGui::GetTextLineHeight();
+    DrawHeart(ImGui::GetWindowDrawList(), ImVec2(p.x, std::floor(p.y + (lineH - 6 * u) * 0.5f)), Col(kSkyDeep));
+    ImGui::Dummy(ImVec2(7 * u, lineH));
+    ImGui::SameLine();
+    ImGui::TextColored(kSkyDeep, "%s", kMenuHint);
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
 // 확대 화면 위 메뉴: 오른쪽 가장자리에 세로 패널로 그린다. keepOpen은 닫기 버튼을 누르면 false가 된다.
 void DrawOverlayUi(bool& keepOpen)
 {
@@ -1381,7 +1399,7 @@ void DrawOverlayUi(bool& keepOpen)
     const float closeW = ImGui::CalcTextSize(closeLabel).x + ImGui::GetStyle().FramePadding.x * 2;
     ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - closeW);
     if (ImGui::Button(closeLabel)) keepOpen = false;
-    Description("Alt+Shift+G로 열고 닫아요");
+    Description("Alt+Shift+M으로 열고 닫아요");
     {
         char help[512];
         snprintf(help, sizeof(help), "%s\n%s", kOverlayHint, kOverlayCaptureNote);
@@ -1585,6 +1603,7 @@ int GuiOverlayRender(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11R
     g_inOverlay = true;
     if (view.menu) DrawOverlayUi(keepOpen);
     if (!keepOpen) action = OVERLAY_ACTION_CLOSE_MENU;
+    if (view.menuHint > 0) MenuHintBanner(view.menuHint);
     switch (view.prompt) {
     case OVERLAY_PROMPT_ASK_REGION:
         switch (PromptBox("##askregion", kAskRegionTitle, kAskRegionDesc, "예", "아니오")) {

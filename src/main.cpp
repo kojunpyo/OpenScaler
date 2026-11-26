@@ -64,7 +64,8 @@ using Clock = std::chrono::steady_clock;
 
 const char* const kModeNames[MODE_COUNT] = { "Nearest", "Bilinear", "Bicubic", "Lanczos2", "FSR 1.0" };
 
-enum HotkeyId { HK_TOGGLE = 1, HK_MENU, HK_MODE, HK_INTEGER, HK_SHARP_UP, HK_SHARP_DOWN, HK_COMPARE, HK_OSD, HK_CURSOR_SPEED, HK_FRAMEGEN, HK_SLOWMO, HK_SLOWMO_PAUSE, HK_SLOWMO_PREV, HK_SLOWMO_NEXT, HK_QUIT };
+// 단축키는 자주 쓰는 것만 둔다 (2026-11-26 사용자 요청). 나머지 설정은 설정 창과 확대 화면 위 메뉴에서 바꾼다.
+enum HotkeyId { HK_TOGGLE = 1, HK_MENU, HK_FRAMEGEN, HK_SLOWMO_PAUSE, HK_SLOWMO_PREV, HK_SLOWMO_NEXT, HK_QUIT };
 
 // HLSL cbuffer Params와 같은 레이아웃 (16바이트 정렬)
 struct ShaderParams {
@@ -452,7 +453,7 @@ static void InitD3D()
 // 오버레이 창
 // ---------------------------------------------------------------------------
 
-// 확대 화면 위 메뉴 (Alt+Shift+G). 열려 있는 동안 확대 화면 창이 마우스를 받고, 게임 창의 포커스는 그대로 둔다.
+// 확대 화면 위 메뉴 (Alt+Shift+M). 열려 있는 동안 확대 화면 창이 마우스를 받고, 게임 창의 포커스는 그대로 둔다.
 static bool g_overlayMenu = false;
 // 확대를 시작하면 묻는 "프레임 생성 영역을 지정할까요?"와 그 뒤의 추천 영역 계산
 enum RegionWizard { WIZARD_NONE, WIZARD_ASK, WIZARD_COMPUTING, WIZARD_EVERYWHERE };
@@ -462,6 +463,8 @@ static void SetOverlayMenu(bool open);
 static const double kWizardSeconds = 10.0;  // "예"를 누른 뒤 이만큼 모아 추천한다
 static bool g_autoOverlay = false;  // 확대를 시작하면 메뉴와 팝업을 띄운다 (설정 창을 쓸 때. --no-gui 측정과 시험에서는 끈다)
 static bool g_overlayInteractive = false;  // 지금 확대 화면 창이 마우스를 받는지 (메뉴나 버튼이 있는 팝업이 떠 있을 때)
+static const int kMenuHintMs = 3500;       // 메뉴를 닫은 뒤 "다시 열기" 안내를 보여 주는 시간 (마지막 0.5초에 흐려진다)
+static Clock::time_point g_menuHintUntil;
 
 static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -1016,6 +1019,8 @@ static void SetOverlayMenu(bool open)
     if (!g_scaling || !g_scaling->overlay) open = false;
     if (g_overlayMenu == open) return;
     g_overlayMenu = open;
+    // 닫으면 다시 여는 단축키를 잠깐 알려 준다 (전체화면의 "F5를 누르면 해제" 안내처럼). 메뉴에서 확대를 끄는 일이 많다.
+    g_menuHintUntil = open || !g_scaling ? Clock::time_point{} : Clock::now() + std::chrono::milliseconds(kMenuHintMs);
     UpdateOverlayInput();
     printf("\n[메뉴] 확대 화면 위 메뉴를 %s\n", open ? "열었습니다" : "닫았습니다");
 }
@@ -1424,7 +1429,7 @@ static void DrawOsd(ScalingSession* s)
             if (g_frameGen->SlowMoRifeHeight() > 0) swprintf_s(generator, L"RIFE %dp", g_frameGen->SlowMoRifeHeight());
             else swprintf_s(generator, L"블록 매칭");
             swprintf_s(text, L"슬로모션 %.1f배 느리게  ·  %dHz 가정  ·  %d / %d  ·  %ls  ·  %ls%ls\n"
-                             L"Alt+Shift+ Space 멈춤  ·  ←→ 한 장씩  ·  O 글자 끄기  ·  T 끝내기",
+                             L"Alt+Shift+ Space 멈춤  ·  ←→ 한 장씩  ·  끝내기는 메뉴(Alt+Shift+M)의 슬로모션 테스트에서",
                        slowdown, SlowMoFps(g_settings, s->refreshHz), g_slowMo.index + 1, (int)frames.size(), kind, generator, g_slowMo.paused ? L"  ·  멈춤" : L"");
         }
         // 상태 표시가 함께 떠 있으면 그 아래에 놓는다.
@@ -1839,9 +1844,11 @@ static void RenderFrame()
         DrawOsd(s);
 
         // Pass 5: 확대 화면 위 메뉴와 팝업. 영역 편집 창을 띄운 동안에는 숨겨 편집 창을 가리지 않는다.
-        if ((g_overlayMenu || g_wizard != WIZARD_NONE) && !g_region.hwnd) {
+        const double hintLeft = std::chrono::duration<double>(g_menuHintUntil - Clock::now()).count();
+        if ((g_overlayMenu || g_wizard != WIZARD_NONE || hintLeft > 0) && !g_region.hwnd) {
             OverlayView view;
             view.menu = g_overlayMenu;
+            if (!g_overlayMenu && g_wizard == WIZARD_NONE && hintLeft > 0) view.menuHint = (float)std::min(1.0, hintLeft / 0.5);
             view.needSeconds = kWizardSeconds;
             if (g_wizard == WIZARD_COMPUTING) {
                 // 추천 영역이 나오면 편집 창을 띄워 사용자가 다듬게 한다.
@@ -1859,7 +1866,7 @@ static void RenderFrame()
             }
             static const int kPrompt[] = { OVERLAY_PROMPT_NONE, OVERLAY_PROMPT_ASK_REGION, OVERLAY_PROMPT_COMPUTING, OVERLAY_PROMPT_EVERYWHERE };
             view.prompt = kPrompt[g_wizard];
-            if (!g_region.hwnd && (view.menu || view.prompt != OVERLAY_PROMPT_NONE)) {
+            if (!g_region.hwnd && (view.menu || view.prompt != OVERLAY_PROMPT_NONE || view.menuHint > 0)) {
                 switch (GuiOverlayRender(g_device.get(), g_ctx.get(), s->backBufferRtv.get(), (int)s->outW, (int)s->outH, view)) {
                 case OVERLAY_ACTION_CLOSE_MENU: SetOverlayMenu(false); break;
                 case OVERLAY_ACTION_YES:
@@ -1957,32 +1964,9 @@ static bool HandleHotkey(int id)
             StartScaling(target);
         }
         break;
-    case HK_MODE:
-        g_settings.mode = (g_settings.mode + 1) % MODE_COUNT;
-        break;
-    case HK_INTEGER:
-        g_settings.integerScale = !g_settings.integerScale;
-        break;
-    case HK_COMPARE:
-        g_settings.compare = !g_settings.compare;
-        break;
-    case HK_OSD:
-        // 슬로모션 재생 중에는 프레임 글자를 끄고 켠다. 글자 없이 화면만 볼 수 있게 한다.
-        if (g_slowMo.state == SLOWMO_PLAYING) {
-            g_slowMo.label = !g_slowMo.label;
-            return true;
-        }
-        g_settings.osdAlways = !g_settings.osdAlways;
-        break;
-    case HK_CURSOR_SPEED:
-        g_settings.adjustCursorSpeed = !g_settings.adjustCursorSpeed;
-        break;
     case HK_FRAMEGEN:
         g_settings.frameGen = !g_settings.frameGen;
         break;
-    case HK_SLOWMO:
-        SlowMoToggle(0);
-        return true;
     case HK_SLOWMO_PAUSE:
         g_slowMo.paused = !g_slowMo.paused;
         return true;
@@ -1992,12 +1976,6 @@ static bool HandleHotkey(int id)
     case HK_SLOWMO_NEXT:
         SlowMoStep(1);
         return true;
-    case HK_SHARP_UP:
-        g_settings.sharpness = std::min(1.0f, g_settings.sharpness + 0.1f);
-        break;
-    case HK_SHARP_DOWN:
-        g_settings.sharpness = std::max(0.0f, g_settings.sharpness - 0.1f);
-        break;
     case HK_MENU:
         if (g_wizard == WIZARD_COMPUTING) {
             SetWizard(WIZARD_NONE);  // 추천 영역 계산을 그만두고 메뉴를 연다
@@ -2164,12 +2142,8 @@ static void RegisterHotkeys()
 {
     const UINT mods = MOD_ALT | MOD_SHIFT | MOD_NOREPEAT;
     struct { int id; UINT vk; const char* name; } keys[] = {
-        { HK_TOGGLE, 'S', "Alt+Shift+S" },        { HK_MODE, 'M', "Alt+Shift+M" },
-        { HK_INTEGER, 'I', "Alt+Shift+I" },       { HK_SHARP_UP, VK_UP, "Alt+Shift+Up" },
-        { HK_SHARP_DOWN, VK_DOWN, "Alt+Shift+Down" }, { HK_COMPARE, 'C', "Alt+Shift+C" },
-        { HK_OSD, 'O', "Alt+Shift+O" },           { HK_CURSOR_SPEED, 'P', "Alt+Shift+P" },
-        { HK_FRAMEGEN, 'F', "Alt+Shift+F" },      { HK_SLOWMO, 'T', "Alt+Shift+T" },
-        { HK_QUIT, 'Q', "Alt+Shift+Q" },          { HK_MENU, 'G', "Alt+Shift+G" },
+        { HK_TOGGLE, 'S', "Alt+Shift+S" }, { HK_MENU, 'M', "Alt+Shift+M" },
+        { HK_FRAMEGEN, 'F', "Alt+Shift+F" }, { HK_QUIT, 'Q', "Alt+Shift+Q" },
     };
     for (auto& k : keys) {
         if (!RegisterHotKey(nullptr, k.id, mods, k.vk))
@@ -2205,15 +2179,8 @@ static void PrintHelp()
     printf("OpenScaler\n"
            "------------------------------------------------------------\n"
            "  Alt+Shift+S     현재 활성 창 스케일링 시작/중지\n"
-           "  Alt+Shift+M     업스케일 모드 변경 (Nearest/Bilinear/Bicubic/Lanczos2/FSR 1.0)\n"
-           "  Alt+Shift+I     정수배 스케일링 켜기/끄기\n"
-           "  Alt+Shift+C     비교 모드 (왼쪽: 일반 확대, 오른쪽: 현재 모드)\n"
-           "  Alt+Shift+O     화면 위 상태 표시 항상 켜기/끄기\n"
-           "  Alt+Shift+P     커서 속도 보정 켜기/끄기 (확대 중 마우스 속도를 배율만큼 낮춤)\n"
+           "  Alt+Shift+M     확대 화면 위 메뉴 열기/닫기 (나머지 설정은 메뉴와 설정 창에서)\n"
            "  Alt+Shift+F     프레임 생성 켜기/끄기\n"
-           "  Alt+Shift+T     슬로모션 테스트 시작/끝내기 (녹화 -> 프레임 생성 -> 느리게 재생)\n"
-           "  Alt+Shift+Up    샤프닝 강하게\n"
-           "  Alt+Shift+Down  샤프닝 약하게\n"
            "  Alt+Shift+Q     프로그램 종료\n"
            "------------------------------------------------------------\n"
            "게임을 창 모드로 실행하고, 게임 창을 클릭한 뒤 Alt+Shift+S를 누르세요.\n\n");
