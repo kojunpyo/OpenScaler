@@ -94,7 +94,8 @@ Alt+Shift + S(시작/중지), M(확대 화면 위 메뉴, 2026-11-26에 G에서 
 - PresentMon은 `--timed`가 지나 기록을 마친 뒤에도 프로세스와 ETW 세션이 남는다. 측정이 끝나면 정리한다. 쌓이면 "error code 1450"으로 시작하지 못한다. 관리자 권한으로 `taskkill /f /im PresentMon.exe`, `logman query -ets`에 보이는 PM 세션을 `logman stop 이름 -ets`로 정리한다.
 - PresentMon을 다시 띄울 때 앞 세션이 남아 있으면 프로세스는 떠 있는데 기록 파일이 생기지 않는다. 관리자 cmd 하나로 세션 정지 -> `taskkill` -> 3초 대기 -> 세션 다시 정지 -> PresentMon 실행(출력을 파일로)을 돌리면 UAC 한 번으로 된다 (2026-11-25). 강제로 끝낸 기록은 마지막 줄이 잘리므로 빼고 분석한다. 끝날 때까지 기록 파일이 잠겨 있으니 `--timed`는 측정 길이에 맞게 짧게 준다.
 - 시간(즉각성) 비교에서 Lossless Scaling은 보통 권한이어도 된다. 관리자 권한은 OBS 게임 캡처로 화질을 녹화할 때만 필요하다. 보통 권한이면 스크립트가 LS 창을 다룰 수 있고, 관리자 권한이어도 전역 단축키(Ctrl+Alt+S)는 받는다.
-- 관리자 권한 OBS(게임 캡처로 LS에 붙음), Wallpaper Engine 등이 떠 있던 측정에서 OpenScaler가 화면 합성(Composed: Flip)을 거쳐 Present부터 표시까지 한 칸이 더 붙었다. 보통은 하드웨어 독립 플립(약 15.7ms)이다. PresentMon의 PresentMode 열로 확인하고, 시간을 비교할 때는 다른 프로그램을 끈다. 원인은 아직 가려내지 않았다.
+- 관리자 권한 OBS(게임 캡처로 LS에 붙음), Wallpaper Engine 등이 떠 있던 측정에서 OpenScaler가 화면 합성(Composed: Flip)을 거쳐 Present부터 표시까지 한 칸이 더 붙었다. 보통은 하드웨어 독립 플립(약 15.7ms)이다. PresentMon의 PresentMode 열로 확인하고, 시간을 비교할 때는 다른 프로그램을 끈다. 2026-11-27에 관리자 권한 Lossless Scaling, 관리자 권한 OBS(LS 게임 캡처, 녹화 안 함)를 하나씩 띄워 봤지만 합성되지 않았다. 예전 기록에서도 첫 실행만 합성이었어서, 가끔 한동안 일어나는 현상일 수 있다. 남은 후보는 재생 중인 Wallpaper Engine(이날은 배경화면이 멈춰 있어 무효), 녹화 중인 OBS, 렌더 거리 32.
+- `--fg-log`의 끊김은 CPU 시각(`PushFrame` 뒤)이라 RIFE 결과를 넘기느라 CPU가 밀린 화면을 센다. 화면 끊김(PresentMon)과는 거의 겹치지 않는다 (2026-11-27, `docs/frame-generation-plan.md` "화면 합성 원인 가려내기").
 - 캡처는 주사율을 넘지 못한다. 이 PC에서 창이 초당 4,608번 그려도 캡처는 60fps였다.
 - 이 노트북은 GPU가 89도에 이르면 소프트웨어 열 제한(nvidia-smi 사유 0x20)으로 클럭이 139~500MHz까지 떨어진다. 게임 두 개나 Wallpaper Engine을 함께 띄우면 쉴 때도 86~89도라 측정이 망가진다. 실행마다 식기를 기다리고 nvidia-smi를 함께 기록해 열 제한 구간을 뺀다 (2026-11-25).
 - 마인크래프트가 게임 메뉴에 있으면 게임 프레임이 없어 프레임 생성이 쉰다. 측정 전에 메뉴를 닫는다.
