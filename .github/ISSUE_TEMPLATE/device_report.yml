@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         README의 성능 평가는 GTX 1060 노트북 한 대에서 잰 값이라, 다른 기기와 게임의 결과가 큰 도움이 됩니다.
-        체감만 적어 주셔도 좋고, 기록까지 모아 주시면 README 6.1의 기준으로 등급을 매길 수 있습니다.
+        체감만 적어 주셔도 좋고, 기록까지 모아 주시면 README 6.2 "어떻게 쟀나"의 기준으로 등급을 매길 수 있습니다.
   - type: input
     id: game
     attributes:
