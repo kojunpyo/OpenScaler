@@ -380,10 +380,20 @@ void GameProfile::UpdateStillSession(const std::vector<StillBox>& found, double 
     }
     std::vector<StillBox> out;
     std::vector<bool> used(found.size(), false);
+    // 저장된 상자를 둘 이상 덮는 상자는 이웃 상자들이 붙어 찾아진 것이다. 이런 상자와 짝지어 위치를 옮기면
+    // 상자가 확대할 때마다 붙은 상자 쪽으로 넓어지므로 짝으로 쓰지 않는다 (덮인 비율로만 확인한다).
+    std::vector<bool> merged(found.size(), false);
+    for (size_t i = 0; i < found.size(); i++) {
+        int covered = 0;
+        for (const StillBox& b : stillBase)
+            if (BoxCoverage(b, { found[i] }) >= kStillBoxCover) covered++;
+        merged[i] = covered >= 2;
+    }
     for (const StillBox& b : stillBase) {
         int best = -1;
         float bestIou = 0.4f;  // 이만큼 겹쳐야 같은 상자로 본다
         for (size_t i = 0; i < found.size(); i++) {
+            if (merged[i]) continue;
             const float iou = BoxIou(b, found[i]);
             if (iou >= bestIou) {
                 bestIou = iou;
