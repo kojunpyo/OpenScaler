@@ -63,6 +63,18 @@ private:
     int m_historyCount = 0;
 };
 
+// 고정 UI 상자: 확대하는 동안 둘레의 화면이 움직여도 같은 자리에 그대로 있던 곳 (게임 화면 크기에 대한 비율 0~1).
+// 픽셀이나 화면은 남기지 않고 위치, 크기, 확신도만 남긴다. 다른 사람의 데이터를 받거나 해상도, UI 배율이 바뀌어도
+// 다음 확대에서 다시 확인해 맞는 상자는 확신도가 오르고, 확인되지 않는 상자는 줄다가 지워진다.
+struct StillBox {
+    float x = 0, y = 0, w = 0, h = 0;
+    float confidence = 0;  // 확인된 확대 횟수 (확인되지 않은 확대마다 1씩 줄고 0이 되면 지운다)
+    float aspect = 0;      // 마지막으로 확인했을 때의 게임 화면 가로/세로 비율 (다르면 시작할 때 쓰지 않는다)
+};
+constexpr int kStillBoxMax = 16;
+constexpr float kStillBoxMaxConfidence = 8.0f;
+constexpr double kStillBoxMinMoving = 20.0;  // 화면이 이만큼(초) 움직인 확대에서만 상자를 확인하거나 줄인다
+
 // 공유를 권하는 최소 채점 수 (RecentGain이 이만큼 모였을 때)
 constexpr int kShareMinEvals = 200;
 
@@ -86,6 +98,15 @@ struct GameProfile {
     bool HasRegion() const { return regionW > 0 && regionH > 0; }
     // 영역을 바꾼다. 화면 지도의 칸 위치가 달라지므로 지도는 처음부터 다시 모은다.
     void SetRegion(float x, float y, float w, float h);
+
+    // 고정 UI 상자 (저장된다). 확대를 시작할 때의 상자(stillBase)에 이번 확대에서 찾은 상자를 합쳐 다시 만든다.
+    // 확대 중에 몇 번 합쳐도(1분마다 저장) 확대 한 번에 한 번 합친 것과 같다.
+    std::vector<StillBox> stillBoxes;
+    std::vector<StillBox> stillBase;
+    bool stillSessionBegun = false;
+    void BeginStillSession();
+    // found: 이번 확대에서 찾은 상자, movingSeconds: 이번 확대에서 화면이 움직인 시간(초), aspect: 게임 화면 가로/세로
+    void UpdateStillSession(const std::vector<StillBox>& found, double movingSeconds, float aspect);
 
     GameProfile();
 

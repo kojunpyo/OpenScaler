@@ -343,6 +343,70 @@ void GameProfile::UpdateGenre()
     else genre = GENRE_GENERAL;
 }
 
+void GameProfile::BeginStillSession()
+{
+    stillBase = stillBoxes;
+    stillSessionBegun = true;
+}
+
+static float BoxIou(const StillBox& a, const StillBox& b)
+{
+    const float ix = std::max(0.0f, std::min(a.x + a.w, b.x + b.w) - std::max(a.x, b.x));
+    const float iy = std::max(0.0f, std::min(a.y + a.h, b.y + b.h) - std::max(a.y, b.y));
+    const float inter = ix * iy, uni = a.w * a.h + b.w * b.h - inter;
+    return uni > 0 ? inter / uni : 0;
+}
+
+void GameProfile::UpdateStillSession(const std::vector<StillBox>& found, double movingSeconds, float aspect)
+{
+    // 화면이 거의 움직이지 않았으면 고정인지 가릴 수 없으므로 시작할 때 그대로 둔다.
+    if (movingSeconds < kStillBoxMinMoving) {
+        stillBoxes = stillBase;
+        return;
+    }
+    std::vector<StillBox> out;
+    std::vector<bool> used(found.size(), false);
+    for (const StillBox& b : stillBase) {
+        int best = -1;
+        float bestIou = 0.4f;  // 이만큼 겹쳐야 같은 상자로 본다
+        for (size_t i = 0; i < found.size(); i++) {
+            const float iou = BoxIou(b, found[i]);
+            if (iou >= bestIou) {
+                bestIou = iou;
+                best = (int)i;
+            }
+        }
+        StillBox m = b;
+        if (best >= 0) {
+            // 확신도가 높을수록 기존 위치를 믿는다. 해상도나 UI 배율이 바뀌어 조금 어긋났으면 점점 옮겨 간다.
+            const StillBox& f = found[best];
+            const float wb = b.confidence / (b.confidence + 1.0f);
+            m.x = b.x * wb + f.x * (1 - wb);
+            m.y = b.y * wb + f.y * (1 - wb);
+            m.w = b.w * wb + f.w * (1 - wb);
+            m.h = b.h * wb + f.h * (1 - wb);
+            m.confidence = std::min(b.confidence + 1.0f, kStillBoxMaxConfidence);
+            m.aspect = aspect;
+            used[best] = true;
+        } else {
+            m.confidence = b.confidence - 1.0f;
+        }
+        if (m.confidence > 0) out.push_back(m);
+    }
+    for (size_t i = 0; i < found.size(); i++) {
+        if (used[i]) continue;
+        StillBox m = found[i];
+        m.confidence = 1.0f;
+        m.aspect = aspect;
+        out.push_back(m);
+    }
+    std::stable_sort(out.begin(), out.end(), [](const StillBox& a, const StillBox& b) {
+        return a.confidence != b.confidence ? a.confidence > b.confidence : a.w * a.h > b.w * b.h;
+    });
+    if (out.size() > (size_t)kStillBoxMax) out.resize(kStillBoxMax);
+    stillBoxes = out;
+}
+
 bool GameProfile::Save(const std::wstring& dir) const
 {
     CreateDirectoryW(dir.c_str(), nullptr);
@@ -397,6 +461,9 @@ bool GameProfile::SaveTo(const std::wstring& path) const
     os << "  \"regionY\": " << regionY << ",\n";
     os << "  \"regionW\": " << regionW << ",\n";
     os << "  \"regionH\": " << regionH << ",\n";
+    std::vector<float> boxValues;
+    for (const StillBox& b : stillBoxes) boxValues.insert(boxValues.end(), { b.x, b.y, b.w, b.h, b.confidence, b.aspect });
+    WriteArray(os, "stillBoxes", boxValues);  // 상자마다 x, y, 너비, 높이, 확신도, 화면 비율
     os << "  \"mapSamples\": " << mapSamples << ",\n";
     WriteArray(os, "map", mapValues, true);
     os << "}\n";
@@ -454,6 +521,21 @@ bool GameProfile::Load(const std::wstring& path)
     regionY = std::clamp((float)ReadNumber(text, "regionY", 0), 0.0f, 1.0f);
     regionW = std::clamp((float)ReadNumber(text, "regionW", 0), 0.0f, 1.0f - regionX);
     regionH = std::clamp((float)ReadNumber(text, "regionH", 0), 0.0f, 1.0f - regionY);
+
+    stillBoxes.clear();
+    std::vector<float> boxValues = ReadArray(text, "stillBoxes");
+    for (size_t i = 0; i + 6 <= boxValues.size() && stillBoxes.size() < (size_t)kStillBoxMax; i += 6) {
+        StillBox b;
+        b.x = std::clamp(boxValues[i], 0.0f, 1.0f);
+        b.y = std::clamp(boxValues[i + 1], 0.0f, 1.0f);
+        b.w = std::clamp(boxValues[i + 2], 0.0f, 1.0f - b.x);
+        b.h = std::clamp(boxValues[i + 3], 0.0f, 1.0f - b.y);
+        b.confidence = std::clamp(boxValues[i + 4], 0.0f, kStillBoxMaxConfidence);
+        b.aspect = std::clamp(boxValues[i + 5], 0.0f, 10.0f);
+        if (b.w > 0 && b.h > 0 && b.confidence > 0) stillBoxes.push_back(b);
+    }
+    stillBase.clear();
+    stillSessionBegun = false;
 
     std::vector<float> mapValues = ReadArray(text, "map");
     if (mapValues.size() == map.size() * 5) {

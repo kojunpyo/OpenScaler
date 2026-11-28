@@ -13,6 +13,9 @@ EVALS_PER_POINT = 20
 GAIN_POINTS = 10
 SHARE_MIN_EVALS = 200
 MAP_VALUES = 32 * 18 * 5
+BOX_VALUES = 6  # 고정 UI 상자: x, y, 너비, 높이, 확신도, 화면 비율
+BOX_MAX = 16
+BOX_MAX_CONFIDENCE = 8
 CHOICES = {
     "cellPx": [4, 8, 16],
     "coarseRadius": [8, 12, 16],
@@ -52,6 +55,14 @@ def check(path, data):
     for key in ("regionX", "regionY", "regionW", "regionH"):
         if not 0 <= data.get(key, 0) <= 1:
             problems.append(f"{key}가 0~1 밖")
+    boxes = data.get("stillBoxes", [])
+    if len(boxes) % BOX_VALUES or len(boxes) > BOX_VALUES * BOX_MAX:
+        problems.append(f"stillBoxes 값 개수가 {BOX_VALUES}의 배수(상자 {BOX_MAX}개 이하)가 아님")
+    else:
+        for i in range(0, len(boxes), BOX_VALUES):
+            x, y, w, h, conf, _aspect = boxes[i:i + BOX_VALUES]
+            if not (0 <= x <= 1 and 0 <= y <= 1 and 0 < w <= 1 - x + 1e-4 and 0 < h <= 1 - y + 1e-4 and 0 < conf <= BOX_MAX_CONFIDENCE):
+                problems.append(f"고정 UI 상자 {i // BOX_VALUES + 1}의 값이 범위 밖")
     return problems
 
 
@@ -77,6 +88,12 @@ def summary(data):
         rows.append(("프레임 생성 영역", f"x {data['regionX']:.2f}, y {data['regionY']:.2f}, 너비 {data['regionW']:.2f}, 높이 {data['regionH']:.2f}"))
     else:
         rows.append(("프레임 생성 영역", "화면 전체"))
+    # 상자 수가 파일마다 달라 맨 뒤에 둔다 (두 파일을 나란히 볼 때 위쪽 줄이 어긋나지 않게)
+    boxes = data.get("stillBoxes", [])
+    rows.append(("고정 UI 상자", f"{len(boxes) // BOX_VALUES}개" if boxes else "없음"))
+    for i in range(0, len(boxes) - BOX_VALUES + 1, BOX_VALUES):
+        x, y, w, h, conf, aspect = boxes[i:i + BOX_VALUES]
+        rows.append((f"  상자 {i // BOX_VALUES + 1}", f"x {x:.3f}, y {y:.3f}, 너비 {w:.3f}, 높이 {h:.3f}, 확신도 {conf:.0f}, 화면 비율 {aspect:.2f}"))
     return rows
 
 
@@ -109,7 +126,8 @@ def main(argv):
         return 1
     tables = [summary(load(p)) for p in argv]
     width = max(len(r[0]) for t in tables for r in t) + 2
-    for i, label in enumerate(r[0] for r in tables[0]):
+    for i in range(max(len(t) for t in tables)):
+        label = next(t[i][0] for t in tables if i < len(t))
         values = [t[i][1] if i < len(t) else "" for t in tables]
         print(f"{label:<{width}}" + "  |  ".join(values))
     return 0

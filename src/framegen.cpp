@@ -47,6 +47,11 @@ const double kChangeMinSeconds = 5.0;  // 이보다 적게 모았으면 추천�
 // RIFE가 GPU를 쓰고 있으면 기다리지 않고 다음 화면에서 다시 확인한다.
 const double kQuickWait = 0.002;
 const size_t kLagSamples = 30;       // 지연을 정할 때 보는 최근 값의 수
+// 장면 전환: 움직임도 믿을 수 없고 제자리 무늬도 다른 칸이 이 비율을 넘으면 앞뒤 프레임이 서로 다른 장면이다.
+const float kCutLowShare = 0.45f;
+// 고르게 펴기: 캡처 시각은 화면 갱신에 맞춰져 실제로 그린 시각보다 최대 한 칸 늦다. 예측한 시각에서 이 비율만큼만 따라간다.
+const double kPaceGain = 0.15;
+const size_t kIntervalSamples = 12;  // 게임 프레임 간격을 정할 때 보는 최근 값의 수 (2, 3, 4장 주기의 배수)
 
 double Seconds()
 {
@@ -94,7 +99,8 @@ struct FrameGen::Cb {
     int temporalCell;
     float zeroBias;
     int wideRadius;
-    int padding[3];
+    int features;
+    int padding[2];
 };
 
 com_ptr<ID3D11ComputeShader> FrameGen::CreateCs(const char* entry)
@@ -129,6 +135,9 @@ FrameGen::FrameGen(ID3D11Device* device, ID3D11DeviceContext* context)
     m_csResize = CreateCs("CSResize");
     m_csRifeCompose = CreateCs("CSRifeCompose");
     m_csPaste = CreateCs("CSPaste");
+    m_csStill = CreateCs("CSStill");
+    m_csStillGrid = CreateCs("CSStillGrid");
+    m_csCutStats = CreateCs("CSCutStats");
 
     D3D11_BUFFER_DESC bd = {};
     bd.ByteWidth = sizeof(Cb);
@@ -193,6 +202,9 @@ void FrameGen::Reset()
     m_acceptedThisRender = false;
     for (auto& result : m_rifeResults) result.seq = -1;
     for (auto& set : m_flowSets) set.hasHistory = false;
+    m_cutChecks.clear();
+    m_cutSeq = m_cutCounted = -1;
+    ClearStill();
 }
 
 FrameGen::Target FrameGen::MakeTarget(UINT w, UINT h, DXGI_FORMAT format, bool uav)
@@ -267,6 +279,13 @@ void FrameGen::EnsureFrames(UINT fullW, UINT fullH, UINT rx, UINT ry, UINT rw, U
     m_regionOutput = region ? MakeTarget(fullW, fullH, DXGI_FORMAT_R8G8B8A8_UNORM, true) : Target{};
     m_mse = MakeTarget((w + 7) / 8, (h + 7) / 8, DXGI_FORMAT_R32_FLOAT, true);
     m_duplicateMse = MakeTarget((m_lvlW[kDuplicateLevel] + 7) / 8, (m_lvlH[kDuplicateLevel] + 7) / 8, DXGI_FORMAT_R32_FLOAT, true);
+    m_still = MakeTarget(w, h, DXGI_FORMAT_R32_UINT, true);
+    m_stillGrid = MakeTarget((w + 7) / 8, (h + 7) / 8, DXGI_FORMAT_R32G32_FLOAT, true);
+    m_stillUnion.assign((size_t)((w + 7) / 8) * ((h + 7) / 8), 0.0f);
+    m_stillUnionW = (w + 7) / 8;
+    m_stillUnionH = (h + 7) / 8;
+    m_cutStats = MakeTarget(1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, true);
+    ClearStill();
     m_stagingPool.clear();
 }
 
@@ -307,6 +326,7 @@ FrameGen::Cb FrameGen::BaseCb(const FlowSet* set) const
         cb.cellSrc = set->cellPx;
     }
     cb.zeroBias = kZeroBias;
+    cb.features = m_features;
     return cb;
 }
 
@@ -424,8 +444,213 @@ void FrameGen::Synthesize(const Frame& a, const Frame& b, const FlowSet& set, fl
     Cb cb = BaseCb(&set);
     cb.t = t;
     cb.blendTol = params.blendTol;
-    Run(m_csCompose.get(), { a.colorSrv.get(), b.colorSrv.get(), set.motion.srv.get(), set.flow[0].srv.get(), set.flow[1].srv.get() },
-        out, cb, (m_w + 7) / 8, (m_h + 7) / 8);
+    Run(m_csCompose.get(),
+        { a.colorSrv.get(), b.colorSrv.get(), set.motion.srv.get(), set.flow[0].srv.get(), set.flow[1].srv.get(), m_still.srv.get() }, out, cb,
+        (m_w + 7) / 8, (m_h + 7) / 8);
+}
+
+void FrameGen::SetProfile(GameProfile* profile)
+{
+    if (profile && !profile->stillSessionBegun) {
+        // 확대를 새로 시작했다: 이번 확대에서 찾는 상자는 처음부터 모은다.
+        profile->BeginStillSession();
+        std::fill(m_stillUnion.begin(), m_stillUnion.end(), 0.0f);
+        m_stillMoving = 0;
+        m_lastStillGrid = -1;
+        m_stillFound.clear();
+    }
+    if (profile != m_profile) m_stillSeedPending = true;
+    m_profile = profile;
+}
+
+void FrameGen::SeedStill()
+{
+    if (!m_still.tex || !m_profile || !(m_features & FG_FEATURE_UIBOX) || m_profile->stillBase.empty()) return;
+    const float aspect = m_fullH ? (float)m_fullW / (float)m_fullH : 0;
+    std::vector<uint32_t> init((size_t)m_w * m_h, 0);
+    bool any = false;
+    for (const StillBox& b : m_profile->stillBase) {
+        // 화면 비율이 다르면 UI 위치가 달라졌을 수 있으므로 미리 채우지 않는다 (확대하면서 다시 확인한다).
+        if (b.confidence < 1.0f || std::abs(b.aspect - aspect) > 0.02f * aspect) continue;
+        const int x0 = std::max(0, (int)std::floor(b.x * m_fullW) - (int)m_regionX);
+        const int y0 = std::max(0, (int)std::floor(b.y * m_fullH) - (int)m_regionY);
+        const int x1 = std::min((int)m_w, (int)std::ceil((b.x + b.w) * m_fullW) - (int)m_regionX);
+        const int y1 = std::min((int)m_h, (int)std::ceil((b.y + b.h) * m_fullH) - (int)m_regionY);
+        for (int y = y0; y < y1; y++)
+            for (int x = x0; x < x1; x++) init[(size_t)y * m_w + x] = 160u << 24;
+        any |= x1 > x0 && y1 > y0;
+    }
+    if (any) m_ctx->UpdateSubresource(m_still.tex.get(), 0, nullptr, init.data(), m_w * sizeof(uint32_t), 0);
+}
+
+void FrameGen::QueueStillGrid(double elapsed)
+{
+    if (!m_stillGrid.uav) return;
+    Cb cb = BaseCb(nullptr);
+    cb.gridSize[0] = (int)m_stillUnionW;
+    cb.gridSize[1] = (int)m_stillUnionH;
+    Run(m_csStillGrid.get(), { m_still.srv.get() }, m_stillGrid.uav.get(), cb, (m_stillUnionW + 7) / 8, (m_stillUnionH + 7) / 8);
+    Pending p;
+    p.staging = GetStaging(m_stillUnionW, m_stillUnionH, DXGI_FORMAT_R32G32_FLOAT);
+    m_ctx->CopyResource(p.staging.get(), m_stillGrid.tex.get());
+    p.kind = 2;
+    p.w = m_stillUnionW;
+    p.h = m_stillUnionH;
+    p.interval = elapsed;
+    m_pending.push_back(std::move(p));
+}
+
+void FrameGen::ProcessStillGrid(const float* data, UINT w, UINT h, UINT rowPitchFloats, double elapsed)
+{
+    if (w != m_stillUnionW || h != m_stillUnionH || !m_fullW || !m_fullH) return;
+    double moving = 0;
+    for (UINT y = 0; y < h; y++)
+        for (UINT x = 0; x < w; x++) {
+            const float* v = data + (size_t)y * rowPitchFloats + x * 2;
+            float& u = m_stillUnion[(size_t)y * w + x];
+            u = std::max(u, v[0]);
+            moving += v[1];
+        }
+    // 화면의 10% 넘게 움직였으면 움직인 시간으로 센다 (리듬게임은 레인만 움직여 평균이 낮다).
+    m_stillMoving += std::min(1.0, moving / ((double)w * h) * 10.0) * elapsed;
+
+    // 증거가 있는 묶음을 한 칸씩 넓혀 이어진 덩어리로 묶는다 (하트 열처럼 사이가 조금 뜬 UI는 상자 하나로).
+    std::vector<uint8_t> mark((size_t)w * h), grown((size_t)w * h);
+    for (size_t i = 0; i < mark.size(); i++) mark[i] = m_stillUnion[i] >= 0.25f;
+    for (UINT y = 0; y < h; y++)
+        for (UINT x = 0; x < w; x++) {
+            bool g = false;
+            for (int dy = -1; dy <= 1 && !g; dy++)
+                for (int dx = -1; dx <= 1 && !g; dx++) {
+                    const int qx = (int)x + dx, qy = (int)y + dy;
+                    g = qx >= 0 && qy >= 0 && qx < (int)w && qy < (int)h && mark[(size_t)qy * w + qx];
+                }
+            grown[(size_t)y * w + x] = g;
+        }
+    std::vector<int> label((size_t)w * h, -1);
+    std::vector<StillBox> found;
+    std::vector<int> stack;
+    for (UINT start = 0; start < w * h; start++) {
+        if (!grown[start] || label[start] >= 0) continue;
+        int x0 = (int)w, y0 = (int)h, x1 = -1, y1 = -1, cells = 0;
+        stack.assign(1, (int)start);
+        label[start] = 1;
+        while (!stack.empty()) {
+            const int i = stack.back();
+            stack.pop_back();
+            const int x = i % (int)w, y = i / (int)w;
+            if (mark[i]) {
+                x0 = std::min(x0, x);
+                y0 = std::min(y0, y);
+                x1 = std::max(x1, x);
+                y1 = std::max(y1, y);
+                cells++;
+            }
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    const int qx = x + dx, qy = y + dy;
+                    if (qx < 0 || qy < 0 || qx >= (int)w || qy >= (int)h) continue;
+                    const int q = qy * (int)w + qx;
+                    if (grown[q] && label[q] < 0) {
+                        label[q] = 1;
+                        stack.push_back(q);
+                    }
+                }
+        }
+        // 너무 작은 덩어리는 우연히 같았던 곳으로, 화면의 15%를 넘는 덩어리는 UI가 아니라 단색 배경(하늘 등)으로 본다.
+        const int area = (x1 - x0 + 1) * (y1 - y0 + 1);
+        if (cells < 3 || area > 0.15 * w * h) continue;
+        StillBox b;
+        const float px0 = (float)(m_regionX + x0 * 8), py0 = (float)(m_regionY + y0 * 8);
+        const float px1 = (float)(m_regionX + std::min((UINT)(x1 + 1) * 8, m_w)), py1 = (float)(m_regionY + std::min((UINT)(y1 + 1) * 8, m_h));
+        b.x = px0 / m_fullW;
+        b.y = py0 / m_fullH;
+        b.w = (px1 - px0) / m_fullW;
+        b.h = (py1 - py0) / m_fullH;
+        found.push_back(b);
+    }
+    m_stillFound = found;
+    if (m_profile) m_profile->UpdateStillSession(found, m_stillMoving, (float)m_fullW / (float)m_fullH);
+}
+
+std::vector<StillBox> FrameGen::TestStillGrid(double elapsed)
+{
+    QueueStillGrid(elapsed);
+    while (!m_pending.empty()) {
+        Pending& p = m_pending.front();
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        check_hresult(m_ctx->Map(p.staging.get(), 0, D3D11_MAP_READ, 0, &mapped));
+        if (p.kind == 2)
+            ProcessStillGrid(static_cast<const float*>(mapped.pData), p.w, p.h, (UINT)(mapped.RowPitch / sizeof(float)), p.interval);
+        m_ctx->Unmap(p.staging.get(), 0);
+        RecycleStaging(std::move(p.staging));
+        m_pending.pop_front();
+    }
+    return m_stillFound;
+}
+
+void FrameGen::UpdateStill(const Frame& a, const Frame& b, const FlowSet& set)
+{
+    if (!m_still.uav) return;
+    if (m_stillSeedPending) {
+        m_stillSeedPending = false;
+        SeedStill();
+    }
+    Cb cb = BaseCb(&set);
+    Run(m_csStill.get(), { a.colorSrv.get(), b.colorSrv.get(), set.flow[0].srv.get() }, m_still.uav.get(), cb, (m_w + 7) / 8, (m_h + 7) / 8);
+}
+
+void FrameGen::ClearStill()
+{
+    if (!m_still.uav) return;
+    const UINT zero[4] = {};
+    m_ctx->ClearUnorderedAccessViewUint(m_still.uav.get(), zero);
+    m_stillSeedPending = true;
+}
+
+void FrameGen::RunCutStats(const Frame& a, const Frame& b, const FlowSet& set)
+{
+    Cb cb = BaseCb(&set);
+    cb.lvlSize[0] = (int)m_lvlW[2];
+    cb.lvlSize[1] = (int)m_lvlH[2];
+    Run(m_csCutStats.get(), { set.flow[0].srv.get(), a.lumaSrv[2].get(), b.lumaSrv[2].get() }, m_cutStats.uav.get(), cb, 1, 1);
+}
+
+void FrameGen::QueueCutCheck(const Frame& a, const Frame& b, const FlowSet& set, long long seq)
+{
+    RunCutStats(a, b, set);
+    CutCheck check;
+    check.staging = GetStaging(1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT);
+    check.seq = seq;
+    m_ctx->CopyResource(check.staging.get(), m_cutStats.tex.get());
+    m_cutChecks.push_back(std::move(check));
+}
+
+void FrameGen::PollCutChecks(bool block)
+{
+    while (!m_cutChecks.empty()) {
+        CutCheck& check = m_cutChecks.front();
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (m_ctx->Map(check.staging.get(), 0, D3D11_MAP_READ, block ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped) != S_OK) return;
+        const float low = static_cast<const float*>(mapped.pData)[0];
+        m_ctx->Unmap(check.staging.get(), 0);
+        if (low > kCutLowShare) m_cutSeq = check.seq;
+        RecycleStaging(std::move(check.staging));
+        m_cutChecks.pop_front();
+    }
+}
+
+float FrameGen::CutScore(const Frame& a, const Frame& b, const FlowSet& set)
+{
+    RunCutStats(a, b, set);
+    auto staging = GetStaging(1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT);
+    m_ctx->CopyResource(staging.get(), m_cutStats.tex.get());
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    check_hresult(m_ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped));
+    const float low = static_cast<const float*>(mapped.pData)[0];
+    m_ctx->Unmap(staging.get(), 0);
+    RecycleStaging(staging);
+    return low;
 }
 
 void FrameGen::Blend(const Frame& a, const Frame& b, float t, ID3D11UnorderedAccessView* out)
@@ -649,6 +874,8 @@ void FrameGen::PollReadbacks()
                 if (++m_evalFilled == 3 && m_profile)
                     m_profile->Learner(m_evalExtrapolate).AddEvaluation(m_evalScores[0], m_evalScores[1], m_evalScores[2], m_profile->mapSamples);
             }
+        } else if (p.kind == 2) {
+            ProcessStillGrid(static_cast<const float*>(mapped.pData), p.w, p.h, (UINT)(mapped.RowPitch / sizeof(float)), p.interval);
         } else if (m_profile) {
             m_profile->AddFlowSample(static_cast<const float*>(mapped.pData), (int)p.w, (int)p.h,
                                      (int)(mapped.RowPitch / sizeof(float)), p.interval);
@@ -945,6 +1172,7 @@ void FrameGen::AcceptIncoming(double time, const FgOptions& options)
     Frame& f = m_frames[0];
     f.time = time;
     m_stats.realFrames++;
+    f.seq = m_stats.realFrames;
     m_count = std::min(m_count + 1, kFrames - 1);
     m_acceptedThisRender = true;
     // 진행 중인 채점의 프레임은 한 칸씩 밀린다. 가장 오래된 f0이 남은 마지막 칸에 오면 더 기다리지 않고 지금 끝낸다
@@ -956,13 +1184,47 @@ void FrameGen::AcceptIncoming(double time, const FgOptions& options)
     m_tripleValid = m_pairValid && gap > 0 && gap < kPauseGap;
     m_pairValid = m_count >= 2 && gap > 0 && gap < kPauseGap;
 
+    const bool pacing = (m_features & FG_FEATURE_PACING) != 0;
     if (m_pairValid) {
         m_intervals.push_back(gap);
-        if (m_intervals.size() > 9) m_intervals.pop_front();
+        if (m_intervals.size() > (pacing ? kIntervalSamples : 9)) m_intervals.pop_front();
         std::vector<double> sorted(m_intervals.begin(), m_intervals.end());
         std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
-        m_interval = sorted[sorted.size() / 2];
+        const double median = sorted[sorted.size() / 2];
+        m_interval = median;
+        if (pacing && sorted.size() >= 5) {
+            // 캡처 간격은 화면 갱신의 배수로만 나온다. 60Hz에서 45fps 게임은 16.7, 16.7, 33.3ms가 되풀이되어 중앙값이 16.7ms라
+            // "넣을 자리 없음"으로 프레임 생성을 쉬었고, 40fps는 16.7과 33.3이 번갈아 중앙값이 오락가락했다.
+            // 평균을 쓰되, 평균의 1.75배가 넘는 간격(게임이 한 장 이상 빠뜨림)은 빼고 다시 낸다. 중앙값의 배수로 거르면
+            // 50fps의 정상 간격 33.3ms(중앙값 16.7ms의 2배)까지 빠졌고, 가장 긴 것을 하나 빼는 방법도 같은 이유로 평균이 낮아졌다.
+            double sum = 0;
+            for (double g : sorted) sum += g;
+            const double mean = sum / sorted.size();
+            double kept = 0;
+            int n = 0;
+            for (double g : sorted)
+                if (g < mean * 1.75) {
+                    kept += g;
+                    n++;
+                }
+            m_interval = n > 0 ? kept / n : mean;
+        }
         m_stats.realFps = 1.0 / m_interval;
+    }
+    // 표시에 쓰는 시각: 앞 프레임에서 보통 간격만큼 지난 자리를 예측하고 캡처 시각 쪽으로 조금만 따라간다.
+    // 게임이 고르게 그려도 캡처 시각은 화면 갱신에 맞춰 들쭉날쭉해, 그대로 쓰면 생성 프레임의 움직임이 빨라졌다 느려졌다 했다.
+    f.showTime = time;
+    if (pacing && m_pairValid && !IsLongGap(gap, m_interval)) {
+        // 게임이 한 장 이상 빠뜨린 간격(보통 간격의 1.75배 이상)은 그만큼 건너뛴 자리를 예측한다.
+        // 들쭉날쭉한 캡처 간격은 60Hz의 50fps에서도 1.67배까지라 여기에 걸리지 않는다.
+        const double ratio = gap / m_interval;
+        const double steps = ratio >= 1.75 ? std::round(ratio) : 1.0;
+        const double predicted = m_frames[1].showTime + steps * m_interval;
+        const double tick = 1.0 / std::max(options.refreshHz, 1.0);
+        double smoothed = predicted + kPaceGain * (time - predicted);
+        smoothed = std::clamp(smoothed, time - tick, time);  // 캡처는 그린 뒤 다음 화면 갱신이므로 캡처 시각보다 늦을 수 없다
+        smoothed = std::max(smoothed, m_frames[1].showTime + 0.25 * m_interval);
+        f.showTime = std::min(smoothed, time);
     }
 
     // 채점과 다음 추정이 flow를 덮어쓰기 전에 지금 쌍의 움직임을 옮겨 둔다. 이 쌍은 이제 한 쌍 앞이 된다.
@@ -989,6 +1251,21 @@ void FrameGen::AcceptIncoming(double time, const FgOptions& options)
         // 긴 간격의 격자에 남은 이전 움직임은 오래전 것이므로 힌트로 쓰지 않는다.
         Estimate(m_frames[1], m_frames[0], params, set, !longGap, useMap, gap);
         m_liveFlow = &set;
+        if (m_features & FG_FEATURE_STILL) {
+            UpdateStill(m_frames[1], m_frames[0], set);
+            // 고정 UI 상자는 5초마다 작은 격자로 읽어 묶는다 (결과는 기다리지 않고 다음 화면들에서 받는다).
+            if ((m_features & FG_FEATURE_UIBOX) && options.learn && m_profile) {
+                if (m_lastStillGrid < 0) m_lastStillGrid = time;
+                else if (time - m_lastStillGrid >= 5.0) {
+                    QueueStillGrid(std::min(time - m_lastStillGrid, 10.0));
+                    m_lastStillGrid = time;
+                }
+            }
+        }
+        if (m_features & FG_FEATURE_CUT) {
+            QueueCutCheck(m_frames[1], m_frames[0], set, f.seq);
+            if (!m_realtime) PollCutChecks(true);
+        }
 
         // 화면 지도 표본은 보통 간격의 움직임에서만 뽑는다.
         if (!longGap && options.learn && m_profile && time - m_lastSampleTime >= kSamplePeriod) {
@@ -1158,7 +1435,7 @@ void FrameGen::RifeCompose(const Frame& a, const Frame& b, const RifeFlow& rife,
     cb.t = t;
     cb.lvlSize[0] = (int)rife.w;
     cb.lvlSize[1] = (int)rife.h;
-    Run(m_csRifeCompose.get(), { a.colorSrv.get(), b.colorSrv.get(), rife.planes.srv.get() }, out, cb,
+    Run(m_csRifeCompose.get(), { a.colorSrv.get(), b.colorSrv.get(), rife.planes.srv.get(), nullptr, nullptr, m_still.srv.get() }, out, cb,
         (m_w + 7) / 8, (m_h + 7) / 8);
 }
 
@@ -1207,6 +1484,7 @@ ID3D11ShaderResourceView* FrameGen::RenderRegion(double now, const FgOptions& op
         m_acceptedThisRender = false;
     }
     PollReadbacks();
+    PollCutChecks(false);
     TimerPoll(m_timerEstimate);
     m_stats.estimateMs = m_timerEstimate.ms;
 
@@ -1235,6 +1513,7 @@ ID3D11ShaderResourceView* FrameGen::RenderRegion(double now, const FgOptions& op
     const Frame& b = m_frames[0];
     m_held = b.colorSrv.get();
     m_stats.noRoom = false;
+    m_stats.contentFrame = (double)b.seq;
     if (!m_pairValid || !m_liveFlow) {
         m_stats.displayT = 1;
         return b.colorSrv.get();
@@ -1278,20 +1557,37 @@ ID3D11ShaderResourceView* FrameGen::RenderRegion(double now, const FgOptions& op
     const RifeFlow* rifeNew = rifeReady ? FindRife(m_stats.realFrames) : nullptr;
     const RifeFlow* rifeOld = rifeReady && m_tripleValid ? FindRife(m_stats.realFrames - 1) : nullptr;
     const bool olderUsable = !extrapolate && m_tripleValid && m_count >= 3 && (m_olderFlow || rifeOld);
-    const bool usePrevious = olderUsable && (m_clock < a.time || (rifeOld && !rifeNew));
+    // 보간은 고르게 편 시각을 쓴다. 외삽은 표시 시계를 캡처 시각에 맞춰 두었으므로 캡처 시각을 그대로 쓴다.
+    auto timeOf = [&](const Frame& f) { return extrapolate ? f.time : f.showTime; };
+    const bool usePrevious = olderUsable && (m_clock < timeOf(a) || (rifeOld && !rifeNew));
     const Frame* showA = usePrevious ? &m_frames[2] : &a;
     const Frame* showB = usePrevious ? &m_frames[1] : &b;
     const RifeFlow* rife = usePrevious ? rifeOld : rifeNew;
     m_held = showA->colorSrv.get();
 
-    float t = (float)((m_clock - showA->time) / (showB->time - showA->time));
+    float t = (float)((m_clock - timeOf(*showA)) / (timeOf(*showB) - timeOf(*showA)));
     if (extrapolate) t = std::clamp(t, 1.0f, (float)ExtrapolateLimit(showB->time - showA->time, m_interval));
     else t = std::clamp(t, 0.0f, 1.0f);
     if (options.multiplier >= 2) t = std::floor(t * options.multiplier) / options.multiplier;
     m_stats.displayT = t;
-    m_stats.contentTime = showA->time + (showB->time - showA->time) * t;
+    m_stats.contentTime = timeOf(*showA) + (timeOf(*showB) - timeOf(*showA)) * t;  // 표시에 쓴 시간축 (고르게 편 시각)
+    m_stats.contentFrame = (double)showA->seq + t;
+    m_stats.captureContentTime = showA->time + (showB->time - showA->time) * t;
     // 영역 밖은 표시 시점에 가까운 게임 프레임을 보여 준다 (영역 안과 시간이 크게 어긋나지 않게).
     m_outside = extrapolate || t >= 0.5f ? showB : showA;
+
+    // 장면 전환: 서로 다른 장면을 섞으면 두 장면이 겹친 이상한 화면이 되므로 가까운 게임 프레임을 그대로 보여 준다.
+    if ((m_features & FG_FEATURE_CUT) && showB->seq == m_cutSeq && !options.visualize) {
+        if (m_cutCounted != m_cutSeq) {
+            m_cutCounted = m_cutSeq;
+            m_stats.sceneCuts++;
+        }
+        const Frame* nearest = extrapolate || t >= 0.5f ? showB : showA;
+        m_stats.displayT = nearest == showB ? 1 : 0;
+        m_stats.contentFrame = (double)nearest->seq;
+        m_stats.captureContentTime = nearest->time;
+        return nearest->colorSrv.get();
+    }
 
     if (options.visualize) {
         Project(*m_liveFlow, std::min(t, 1.0f));
@@ -1408,6 +1704,7 @@ bool FrameGen::SlowMoStartGenerating(int targetFps, int maxFrames)
     std::nth_element(gaps.begin(), gaps.begin() + gaps.size() / 2, gaps.end());
     m_slowMoTypical = gaps[gaps.size() / 2];
     m_slowMoFrames.reserve(emitted);
+    ClearStill();  // 고정 픽셀 기록은 녹화한 프레임 쌍으로 처음부터 다시 쌓는다
     return emitted > 0;
 }
 
@@ -1489,10 +1786,14 @@ bool FrameGen::SlowMoGenerateStep(const FgOptions& options)
         const bool longGap = IsLongGap(gap, m_slowMoTypical);
         if (longGap) params = ForLongGap(params);
         FlowSet& set = GetFlowSet(params.cellPx);
-        if (!useRife) {
+        bool cut = false;
+        if (!useRife || (m_features & FG_FEATURE_CUT)) {
             UpdateMapTexture();
             const bool useMap = options.useMap && params.useMap && m_profile && m_profile->mapSamples >= 20;
             Estimate(a, b, params, set, !longGap, useMap, gap);
+            if (!useRife && (m_features & FG_FEATURE_STILL)) UpdateStill(a, b, set);
+            // 장면 전환이면 실시간과 같이 가까운 진짜 프레임을 보여 준다 (RIFE도 움직임 찾기로 판단한다).
+            if (m_features & FG_FEATURE_CUT) cut = CutScore(a, b, set) > kCutLowShare;
         }
         for (int j = 1; j < count; j++) {
             m_slowMoGenerated.push_back(MakeTarget(m_w, m_h, DXGI_FORMAT_R8G8B8A8_UNORM, true));
@@ -1500,7 +1801,8 @@ bool FrameGen::SlowMoGenerateStep(const FgOptions& options)
             shown.srv = out.srv.get();
             shown.t = (float)j / count;
             shown.generated = true;
-            if (useRife) RifeCompose(a, b, m_rifeResults[0], shown.t, out.uav.get());
+            if (cut) Blend(a, b, shown.t < 0.5f ? 0.0f : 1.0f, out.uav.get());
+            else if (useRife) RifeCompose(a, b, m_rifeResults[0], shown.t, out.uav.get());
             else Synthesize(a, b, set, shown.t, params, out.uav.get());
             m_slowMoFrames.push_back(shown);
         }
@@ -1532,6 +1834,7 @@ std::vector<uint32_t> FrameGen::SlowMoReadFrame(int index)
 
 void FrameGen::SlowMoClear()
 {
+    ClearStill();
     m_slowMoFrames.clear();
     m_slowMoGenerated.clear();
     m_slowMoReal.clear();
@@ -1705,6 +2008,21 @@ FrameGen::RifeTestResult FrameGen::TestRifePsnr(int a, int b, int reference, flo
     r.psnr = BlockingMsePsnr(m_evalOutput.srv.get(), m_frames[reference].colorSrv.get());
     r.inferMs = m_rifeLastInferMs;
     return r;
+}
+
+void FrameGen::TestUpdateStill(int a, int b)
+{
+    const FgParams params;
+    FlowSet& set = GetFlowSet(params.cellPx);
+    Estimate(m_frames[a], m_frames[b], params, set, false, false, 1.0 / 30.0);
+    UpdateStill(m_frames[a], m_frames[b], set);
+}
+
+float FrameGen::TestCutScore(int a, int b, const FgParams& params)
+{
+    FlowSet& set = GetFlowSet(params.cellPx);
+    Estimate(m_frames[a], m_frames[b], params, set, false, false, 1.0 / 30.0);
+    return CutScore(m_frames[a], m_frames[b], set);
 }
 
 std::string FrameGen::TestRifeError()

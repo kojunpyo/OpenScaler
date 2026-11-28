@@ -6,6 +6,7 @@
 #           (1.3.3부터) 게임 프레임을 넘기는 데 CPU가 머문 ms, 표시 프레임을 만드는 데 머문 ms, 받아들이기 지연 ms, RIFE 결과 지연 ms(표시에 쓴 값),
 #           마지막 RIFE 결과의 지연 ms, 캡처부터 넘길 때까지 ms (새 프레임이 없으면 -1)
 #           (1.3.4부터) 화면 번호, GPU 시간이 나온 화면 번호, 그 화면의 GPU 시간 ms(프레임 생성부터 상태 표시까지), 그중 프레임 생성까지 ms
+#           (1.6.0부터) 장면 전환으로 보고 생성하지 않은 프레임 쌍 수 (누적), 화면 속 게임 시각을 캡처 시각 축으로 (고르게 펴기 전)
 # 주사율은 출력 간격의 중앙값으로 정한다 (수직 동기화로 화면마다 한 번 그리므로). 그래서 60Hz와 144Hz 모니터에 같은 기준을 쓴다.
 import statistics
 import sys
@@ -21,6 +22,7 @@ rows = []
 heights = []
 gpu = []  # (움직임 찾기 ms, 합성 ms, 작업 너비, 작업 높이)
 cpu = []  # (넘기기 ms, 만들기 ms, RIFE 결과 지연 ms)
+capture_lat = []  # 표시 시각 - 캡처 시각 축의 화면 속 시각 (ms)
 for line in open(sys.argv[1]):
     a = line.strip().split(',')
     if len(a) >= 8 and a[0] != 'slowmo':
@@ -31,10 +33,13 @@ for line in open(sys.argv[1]):
             gpu.append((float(a[9]), float(a[10]), int(a[11]), int(a[12])))
         if len(a) >= 18:
             cpu.append((float(a[13]), float(a[14]), float(a[17])))
+        if len(a) >= 25:
+            capture_lat.append((float(a[0]) - float(a[24])) * 1000 if float(a[24]) > 0 else None)
 rows = rows[len(rows) // 5:]  # 시작 직후(RIFE 준비, 표시 시계 안정)는 뺀다
 heights = heights[len(heights) // 5:]
 gpu = gpu[len(gpu) // 5:]
 cpu = cpu[len(cpu) // 5:]
+capture_lat = [v for v in capture_lat[len(capture_lat) // 5:] if v is not None]
 
 times = [r[0] for r in rows]
 gaps = [(b - a) * 1000 for a, b in zip(times, times[1:])]
@@ -73,6 +78,9 @@ if steps:
 added = latency - game_ms
 if lat_values:
     show("지연 (게임 프레임 간격 제외)", f"{latency:.1f}ms (+{added:.1f}ms)" if latency > 1 else f"{latency:.1f}ms", grade(added, 10, 25, False), "+10ms / +25ms 이하")
+if capture_lat:
+    cap = statistics.median(capture_lat)
+    show("지연, 캡처 시각 기준 (1.6.0부터)", f"{cap:.1f}ms (+{cap - game_ms:.1f}ms)", grade(cap - game_ms, 10, 25, False), "+10ms / +25ms 이하")
 shown = rows[-1][4] - rows[0][4]
 missed = rows[-1][5] - rows[0][5]
 if shown + missed > 0:

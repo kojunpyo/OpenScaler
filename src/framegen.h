@@ -24,6 +24,16 @@ using winrt::com_ptr;
 enum FgQuality { FG_QUALITY_FAST, FG_QUALITY_NORMAL, FG_QUALITY_HIGH, FG_QUALITY_COUNT };
 enum FgMethod { FG_METHOD_INTERPOLATE, FG_METHOD_EXTRAPOLATE, FG_METHOD_COUNT };
 enum FgGenerator { FG_GENERATOR_BLOCK, FG_GENERATOR_RIFE, FG_GENERATOR_COUNT };
+// 1.6.0에서 더한 처리. 비교 측정을 위해 하나씩 끌 수 있다 (--fg-old는 모두 끈다).
+enum FgFeature {
+    FG_FEATURE_STILL = 1,   // 오래 멈춰 있는 픽셀(고정 UI, 조준점)은 생성 프레임에서도 원래 픽셀을 둔다
+    FG_FEATURE_CUT = 2,     // 장면 전환이면 섞지 않고 가까운 게임 프레임을 보여 준다
+    FG_FEATURE_FADE = 4,    // 제자리에서 밝기만 바뀌는 곳은 움직임 대신 앞뒤 프레임을 섞는다
+    FG_FEATURE_PACING = 8,  // 캡처 시각의 들쭉날쭉함을 고르게 펴서 쓴다 (정수배가 아닌 배수)
+    FG_FEATURE_UIBOX = 16,  // 화면이 움직이는 동안 오래 그대로인 픽셀은 둘레와 상관없이 지키고, 고정 UI 상자를 게임별로 저장해 다음 확대에서 바로 쓴다
+    FG_FEATURE_POP = 32,    // 커지며 나타나는 판정 글자처럼 제자리 상관이 조금 낮은 곳도 앞뒤를 섞는다
+    FG_FEATURE_ALL = 63,
+};
 
 struct FgOptions {
     int multiplier = 0;      // 0: 주사율까지 자동으로 채우기, 2~4: 진짜 프레임 사이를 그 수만큼 나눈다
@@ -44,9 +54,12 @@ struct FgStats {
     double synthMs = 0;     // 중간 프레임 합성 GPU 시간 (화면을 그릴 때마다)
     double displayT = 0;    // 마지막으로 그린 시점
     double contentTime = 0; // 마지막으로 그린 화면이 게임 시간으로 언제인지 (초, 진행이 고른지 확인용)
+    double captureContentTime = 0;  // 같은 화면을 캡처 시각 축으로 (고르게 펴기 전, 지연 비교용)
+    double contentFrame = 0; // 마지막으로 그린 화면이 몇 번째 게임 프레임 자리인지 (소수: 앞 프레임 번호 + 시점, 간격 시험용)
     bool noRoom = false;    // 진짜 프레임이 주사율만큼 나와 넣을 자리가 없다
     long long duplicates = 0;  // 내용이 같아 버린 캡처 프레임 수
     long long realFrames = 0;  // 받아들인 진짜 프레임 수
+    long long sceneCuts = 0;   // 장면 전환으로 보고 생성하지 않은 프레임 쌍 수
     int workW = 0, workH = 0;  // 움직임 추정과 합성 크기 (영역을 지정했으면 영역 크기)
 
     // RIFE
@@ -66,7 +79,9 @@ class FrameGen {
 public:
     FrameGen(ID3D11Device* device, ID3D11DeviceContext* context);
 
-    void SetProfile(GameProfile* profile) { m_profile = profile; }
+    void SetProfile(GameProfile* profile);
+    void SetFeatures(int features) { m_features = features; }  // FgFeature 조합
+    int Features() const { return m_features; }
     // 프로필 내용을 통째로 바꿨을 때 (공유받은 데이터를 가져옴): 화면 지도를 다시 올리고 처음부터 쌓는다
     void ProfileReloaded()
     {
@@ -152,6 +167,15 @@ public:
     bool TestRifeRun(int a, int b, int quality);  // 신경망 실행. 결과는 다음 호출까지 유지된다
     RifeTestResult TestRifePsnr(int a, int b, int reference, float t);
     std::string TestRifeError();
+    // 고정 픽셀 기록: 슬롯 a, b를 이웃한 게임 프레임 쌍으로 넣는다 / 지운다
+    void TestUpdateStill(int a, int b);
+    void TestClearStill() { ClearStill(); }
+    std::vector<uint32_t> TestReadStill() { UINT w, h; return TestReadSrv(m_still.srv.get(), w, h); }  // 픽셀마다 이어서 같았던 수 | 둘레 움직임 비율 << 8 | 고정 UI 증거 << 24
+    // 고정 UI 상자: 지금 고정 픽셀 기록을 기다려서 읽고 상자로 묶어 프로필에 합친다. elapsed: 지난 호출 뒤 흐른 시간(초)
+    std::vector<StillBox> TestStillGrid(double elapsed);
+    std::vector<StillBox> FoundStillBoxes() const { return m_stillFound; }  // 이번 확대에서 찾은 상자
+    // 슬롯 a, b 사이 움직임에서 믿을 수 없는 칸의 비율 (장면 전환 판단에 쓰는 값)
+    float TestCutScore(int a, int b, const FgParams& params);
 
 private:
     static constexpr int kLevels = 5;  // 원본, 1/2, 1/4, 1/8, 1/16
@@ -168,6 +192,8 @@ private:
         std::array<com_ptr<ID3D11ShaderResourceView>, kLevels> lumaSrv;
         std::array<com_ptr<ID3D11UnorderedAccessView>, kLevels> lumaUav;
         double time = 0;
+        long long seq = 0;  // 받아들인 순서 (m_stats.realFrames)
+        double showTime = 0;  // 표시에 쓰는 시각: 캡처 시각을 고르게 편 값 (FG_FEATURE_PACING이 꺼져 있으면 time과 같다)
     };
 
     struct Target {
@@ -198,7 +224,7 @@ private:
 
     struct Pending {
         com_ptr<ID3D11Texture2D> staging;
-        int kind = 0;      // 0: 채점, 1: 움직임 표본
+        int kind = 0;      // 0: 채점, 1: 움직임 표본, 2: 고정 UI 격자
         int evalGroup = 0;
         int evalIndex = 0;  // 0: 현재 값, 1: 후보, 2: 블렌딩
         UINT w = 0, h = 0;
@@ -256,6 +282,15 @@ private:
     void RunEvaluationStep();
     FgParams LearnedParams(const FgOptions& options) const;  // 이 게임에서 지금 방식(보간/외삽)으로 학습한 값
     void QueueFlowSample(const FlowSet& set, double interval);
+    void UpdateStill(const Frame& a, const Frame& b, const FlowSet& set);  // 이웃한 게임 프레임 쌍과 그 움직임으로 고정 픽셀 기록을 갱신한다
+    void ClearStill();
+    void SeedStill();  // 저장된 고정 UI 상자 안을 처음부터 지키도록 고정 UI 증거를 채운다
+    void QueueStillGrid(double elapsed);
+    void ProcessStillGrid(const float* data, UINT w, UINT h, UINT rowPitchFloats, double elapsed);  // 상자로 묶어 프로필에 합친다
+    void QueueCutCheck(const Frame& a, const Frame& b, const FlowSet& set, long long seq);  // 지금 쌍의 움직임에서 장면 전환 여부를 읽어 올 준비를 한다
+    void PollCutChecks(bool block);
+    float CutScore(const Frame& a, const Frame& b, const FlowSet& set);  // 기다려서 바로 읽는다
+    void RunCutStats(const Frame& a, const Frame& b, const FlowSet& set);
     void PollReadbacks();
     void UpdateMapTexture();
 
@@ -298,7 +333,7 @@ private:
     com_ptr<ID3D11Device> m_device;
     com_ptr<ID3D11DeviceContext> m_ctx;
     com_ptr<ID3D11ComputeShader> m_csLuma, m_csDown, m_csMatch, m_csConsist, m_csProject, m_csFill, m_csCompose, m_csBlend,
-        m_csVisualize, m_csMse, m_csResize, m_csRifeCompose, m_csPaste;
+        m_csVisualize, m_csMse, m_csResize, m_csRifeCompose, m_csPaste, m_csStill, m_csCutStats, m_csStillGrid;
     com_ptr<ID3D11Buffer> m_cb;
     com_ptr<ID3D11SamplerState> m_sampler;
 
@@ -321,6 +356,23 @@ private:
     Target m_evalOutput;
     Target m_mse;
     Target m_duplicateMse;
+    Target m_still;      // 픽셀마다 x: 앞뒤 게임 프레임이 이어서 같았던 쌍의 수, y: 둘레가 움직인 비율
+    Target m_stillGrid;  // 고정 UI 격자 (8x8 픽셀 묶음마다 증거 비율, 둘레 움직임)
+    bool m_stillSeedPending = false;  // 다음 고정 픽셀 갱신 전에 저장된 상자로 채운다
+    std::vector<float> m_stillUnion;  // 이번 확대에서 묶음마다 본 증거 비율의 최댓값 (UI가 잠깐 바뀌어 증거가 지워져도 남게)
+    UINT m_stillUnionW = 0, m_stillUnionH = 0;
+    double m_stillMoving = 0;         // 이번 확대에서 화면이 움직인 시간 (초, 움직인 비율을 곱해 쌓음)
+    double m_lastStillGrid = -1;
+    std::vector<StillBox> m_stillFound;
+    Target m_cutStats;   // 장면 전환 판단 값 (1x1)
+    struct CutCheck {
+        com_ptr<ID3D11Texture2D> staging;
+        long long seq = 0;
+    };
+    std::deque<CutCheck> m_cutChecks;
+    long long m_cutSeq = -1;      // 장면 전환으로 판단한 쌍의 뒤 프레임 번호
+    long long m_cutCounted = -1;
+    int m_features = FG_FEATURE_ALL;
     com_ptr<ID3D11Texture2D> m_mapTex;
     com_ptr<ID3D11ShaderResourceView> m_mapSrv;
     int m_mapUploaded = -1;

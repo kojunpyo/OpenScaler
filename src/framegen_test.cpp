@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -181,6 +182,48 @@ std::vector<SceneInfo> MakeScenes(const NoiseTexture& noise)
     return scenes;
 }
 
+// 1.6.0 처리를 시험하는 장면 (앞의 표들과 섞이지 않게 따로 둔다)
+std::vector<SceneInfo> MakeExtraScenes(const NoiseTexture& noise)
+{
+    const NoiseTexture* n = &noise;
+    std::vector<SceneInfo> scenes;
+
+    // 움직이는 배경 위의 얇은 조준점과 글자 (배경이 비쳐 보이는 작은 고정 UI)
+    scenes.push_back({ "crosshair", "조준점 + 얇은 글자", [n](float f, float x, float y, int w, int h) {
+        Rgb c = Textured(*n, x + f * 9.0f, y + f * 3.0f, { 0.9f, 0.9f, 1.0f });
+        const float cx = w * 0.5f, cy = h * 0.5f;
+        const bool arm = (std::abs(x - cx) < 1.5f && std::abs(y - cy) < 14.0f && std::abs(y - cy) > 4.0f) ||
+                         (std::abs(y - cy) < 1.5f && std::abs(x - cx) < 14.0f && std::abs(x - cx) > 4.0f);
+        if (arm) return Rgb{ 1, 1, 1 };
+        // 왼쪽 위 글자: 3픽셀 획의 글자 모양만 칠하고 사이로 배경이 보인다
+        if (x > w * 0.05f && x < w * 0.25f && y > h * 0.06f && y < h * 0.11f) {
+            const int gx = (int)((x - w * 0.05f) / 3), gy = (int)((y - h * 0.06f) / 3);
+            if ((gx % 4 == 0) || (gy % 5 == 0 && gx % 4 < 3)) return Rgb{ 1, 0.95f, 0.4f };
+        }
+        return c;
+    } });
+
+    // 제자리에서 밝기와 대비가 크게 바뀌는 글자 (리듬게임의 판정 글자)
+    scenes.push_back({ "flash_text", "깜빡이는 글자", [n](float f, float x, float y, int w, int h) {
+        Rgb c = Textured(*n, x + f * 2.0f, y, { 0.25f, 0.25f, 0.3f });
+        if (x > w * 0.3f && x < w * 0.7f && y > h * 0.4f && y < h * 0.6f) {
+            const float gain = 0.2f + 0.8f * std::abs(std::sin(f * 0.9f));
+            const int gx = (int)((x - w * 0.3f) / 8), gy = (int)((y - h * 0.4f) / 8);
+            const bool glyph = (gx % 3 != 2) && ((gy % 4 == 0) || (gx % 3 == 0) || ((gx + gy) % 5 == 0));
+            if (glyph) return Rgb{ c.r + gain * (1.0f - c.r), c.g + gain * (0.8f - c.g), c.b + gain * (0.3f - c.b) };
+            return Rgb{ c.r * (1.0f - 0.5f * gain), c.g * (1.0f - 0.5f * gain), c.b * (1.0f - 0.5f * gain) };
+        }
+        return c;
+    } });
+
+    // 장면 전환: 프레임 10과 11 사이에서 전혀 다른 장면으로 바뀐다
+    scenes.push_back({ "cut", "장면 전환", [n](float f, float x, float y, int, int) {
+        if (f < 10.5f) return Textured(*n, x + f * 9.0f, y, { 1.0f, 0.85f, 0.7f });
+        return Textured(*n, x * 1.3f + 400.0f - f * 6.0f, y * 1.3f + 200.0f, { 0.6f, 0.8f, 1.0f });
+    } });
+    return scenes;
+}
+
 // 경계가 계단처럼 튀지 않게 픽셀마다 4점을 평균해 그린다.
 std::vector<uint32_t> Render(const Scene& scene, float frame, int w, int h)
 {
@@ -240,6 +283,167 @@ const int kSamples = 4;       // 장면마다 시험하는 프레임 묶음 수
 const double kInterval = 1.0 / 30.0;  // 테스트 영상의 프레임 간격 (가정)
 
 }  // namespace
+
+// 사각형 안의 PSNR (RGBA 두 장)
+double RectPsnr(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b, int w, int x0, int y0, int x1, int y1)
+{
+    double sum = 0;
+    long long n = 0;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            const uint32_t p = a[(size_t)y * w + x], q = b[(size_t)y * w + x];
+            for (int k = 0; k < 24; k += 8) {
+                const double d = (double)((p >> k) & 0xFF) - (double)((q >> k) & 0xFF);
+                sum += d * d;
+            }
+            n += 3;
+        }
+    const double mse = sum / std::max(n, 1LL) / (255.0 * 255.0);
+    return mse <= 1e-10 ? 100.0 : -10.0 * std::log10(mse);
+}
+
+// 5. 1.6.0 처리: 같은 프레임으로 껐을 때와 켰을 때를 비교한다 -----------------------------
+void RunFeatureTests(FrameGen& fg, const std::vector<SceneInfo>& scenes, const std::vector<SceneInfo>& extra, const std::wstring& outDir)
+{
+    auto find = [&](const char* key) -> const SceneInfo* {
+        for (auto& s : scenes)
+            if (strcmp(s.key, key) == 0) return &s;
+        for (auto& s : extra)
+            if (strcmp(s.key, key) == 0) return &s;
+        return nullptr;
+    };
+    const int W = 1280, H = 720;
+    const FgParams defaults;
+    std::ofstream csv(outDir + L"\\fg_features.csv");
+    csv << "test,scene,gap,off_db,on_db,off_ui_db,on_ui_db\n";
+
+    // 고정 UI: 이웃한 프레임 쌍 56개(30fps면 1.9초) 또는 160개(5.3초)로 고정 픽셀을 쌓은 뒤 만든다. 전체와 UI 부분의 PSNR.
+    // 끔 / 켬(고정 픽셀) / 증거(고정 픽셀 + 고정 UI 증거, FG_FEATURE_UIBOX). 증거는 128쌍 넘게 쌓여야 효과가 있다.
+    printf("\n[고정 UI] 고정 픽셀 보호 끔 / 켬 / 증거 (1280x720, dB)\n%-10s %4s %4s %8s %8s %8s %8s %8s %8s\n", "장면", "간격", "쌓기", "전체 끔",
+           "전체 켬", "전체 증거", "UI 끔", "UI 켬", "UI 증거");
+    struct Ui { const char* key; int x0, y0, x1, y1; };
+    const Ui uis[] = { { "pan_ui", (int)(W * 0.04f), (int)(H * 0.82f), (int)(W * 0.34f), (int)(H * 0.95f) },
+                       { "crosshair", W / 2 - 16, H / 2 - 16, W / 2 + 16, H / 2 + 16 },
+                       { "rhythm", (int)(W * 0.75f), (int)(H * 0.06f), (int)(W * 0.95f), (int)(H * 0.14f) } };
+    for (auto& ui : uis) {
+        const SceneInfo* scene = find(ui.key);
+        for (int warm : { 56, 160 })
+        for (int gap : { 1, 2 }) {
+            double whole[3] = {}, part[3] = {};
+            for (int i = 0; i < kSamples; i++) {
+                const float base = 200.0f + i * 7.0f;
+                fg.TestClearStill();
+                auto previous = Render(scene->shade, base - warm, W, H);
+                for (int k = 0; k < warm; k++) {
+                    auto next = Render(scene->shade, base - warm + 1 + k, W, H);
+                    fg.TestLoadFrame(0, previous.data(), W, H);
+                    fg.TestLoadFrame(1, next.data(), W, H);
+                    fg.TestUpdateStill(0, 1);
+                    previous = std::move(next);
+                }
+                auto f0 = Render(scene->shade, base, W, H);
+                auto f1 = Render(scene->shade, base + gap, W, H);
+                auto ref = Render(scene->shade, base + gap * 0.5f, W, H);
+                fg.TestLoadFrame(0, f0.data(), W, H);
+                fg.TestLoadFrame(1, f1.data(), W, H);
+                fg.TestLoadFrame(2, ref.data(), W, H);
+                const int modes[3] = { 0, FG_FEATURE_STILL, FG_FEATURE_STILL | FG_FEATURE_UIBOX };
+                for (int mode = 0; mode < 3; mode++) {
+                    fg.SetFeatures(modes[mode]);
+                    whole[mode] += fg.TestSynthPsnr(0, 1, 2, 0.5f, defaults, false, kInterval * gap).psnr;
+                    auto out = fg.TestReadOutput();
+                    part[mode] += RectPsnr(out, ref, W, ui.x0, ui.y0, ui.x1, ui.y1);
+                    if (i == 1 && warm == 160) {
+                        const std::wstring stem = outDir + L"\\feat_" + std::wstring(ui.key, ui.key + strlen(ui.key)) + L"_gap" + std::to_wstring(gap);
+                        const wchar_t* names[3] = { L"_off.bmp", L"_on.bmp", L"_uibox.bmp" };
+                        SaveBmp(stem + names[mode], out, W, H);
+                        if (mode == 0) SaveBmp(stem + L"_truth.bmp", ref, W, H);
+                    }
+                }
+            }
+            const double k = 1.0 / kSamples;
+            printf("%-10s %4d %4d %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f\n", ui.key, gap, warm, whole[0] * k, whole[1] * k, whole[2] * k, part[0] * k,
+                   part[1] * k, part[2] * k);
+            fflush(stdout);
+            csv << "still," << ui.key << "," << gap << "_" << warm << "," << whole[0] * k << "," << whole[1] * k << "," << part[0] * k << "," << part[1] * k
+                << "," << whole[2] * k << "," << part[2] * k << "\n";
+        }
+    }
+    fg.TestClearStill();
+
+    // 장면 전환: 움직임 격자에서 믿을 수 없는 칸의 비율. 전환은 기준(0.45)을 넘고 다른 장면은 넘지 않아야 한다.
+    printf("\n[장면 전환] 믿을 수 없는 칸의 비율 (기준 0.45 초과면 전환, 1280x720)\n");
+    fg.SetFeatures(FG_FEATURE_ALL);
+    double worst = 0;
+    const char* worstKey = "";
+    std::vector<const SceneInfo*> normal;
+    for (auto& s : scenes) normal.push_back(&s);
+    for (auto& s : extra)
+        if (strcmp(s.key, "cut") != 0) normal.push_back(&s);
+    for (const SceneInfo* scene : normal) {
+        double sceneMax = 0;
+        for (int i = 0; i < kSamples; i++) {
+            const float base = 3.0f + i * 4.0f;
+            for (int gap : { 1, 4 }) {
+                auto f0 = Render(scene->shade, base, W, H);
+                auto f1 = Render(scene->shade, base + gap, W, H);
+                fg.TestLoadFrame(0, f0.data(), W, H);
+                fg.TestLoadFrame(1, f1.data(), W, H);
+                sceneMax = std::max(sceneMax, (double)fg.TestCutScore(0, 1, gap > 1 ? FrameGen::ForLongGap(defaults) : defaults));
+            }
+        }
+        printf("  %-10s 최대 %.3f\n", scene->key, sceneMax);
+        csv << "cut," << scene->key << ",1/4," << sceneMax << ",,,\n";
+        if (sceneMax > worst) {
+            worst = sceneMax;
+            worstKey = scene->key;
+        }
+    }
+    const SceneInfo* cut = find("cut");
+    auto c0 = Render(cut->shade, 10.0f, W, H);
+    auto c1 = Render(cut->shade, 11.0f, W, H);
+    fg.TestLoadFrame(0, c0.data(), W, H);
+    fg.TestLoadFrame(1, c1.data(), W, H);
+    const double cutScore = fg.TestCutScore(0, 1, defaults);
+    printf("  %-10s %.3f  (다른 장면 중 가장 높은 값: %s %.3f)  %s\n", "cut", cutScore, worstKey, worst,
+           cutScore > 0.45 && worst <= 0.45 ? "통과" : "실패");
+    csv << "cut,cut,1," << cutScore << ",,,\n";
+    fflush(stdout);
+
+    // 밝기 변화: 제자리 상관 보정 끔 / 켬. 다른 장면이 나빠지지 않는지도 본다 (4칸은 긴 간격 설정).
+    // 판정 글자(FG_FEATURE_POP): 제자리 상관 기준을 0.9에서 0.6으로 낮춘 결과도 함께 낸다.
+    printf("\n[밝기 변화] 제자리 상관 보정 끔 / 켬 / 낮춘 기준 (1280x720, dB)\n%-10s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n", "장면", "1칸 끔", "1칸 켬",
+           "1칸 낮춤", "2칸 끔", "2칸 켬", "2칸 낮춤", "4칸 끔", "4칸 켬", "4칸 낮춤");
+    for (const SceneInfo* scene : normal) {
+        double r[3][3] = {};
+        for (int i = 0; i < kSamples; i++) {
+            const float base = 3.0f + i * 4.0f;
+            const int gaps[3] = { 1, 2, 4 };
+            for (int g = 0; g < 3; g++) {
+                const int gap = gaps[g];
+                auto f0 = Render(scene->shade, base, W, H);
+                auto f1 = Render(scene->shade, base + gap, W, H);
+                auto ref = Render(scene->shade, base + gap * 0.5f, W, H);
+                fg.TestLoadFrame(0, f0.data(), W, H);
+                fg.TestLoadFrame(1, f1.data(), W, H);
+                fg.TestLoadFrame(2, ref.data(), W, H);
+                const FgParams params = gap >= 4 ? FrameGen::ForLongGap(defaults) : defaults;
+                const int modes[3] = { 0, FG_FEATURE_FADE, FG_FEATURE_FADE | FG_FEATURE_POP };
+                for (int mode = 0; mode < 3; mode++) {
+                    fg.SetFeatures(modes[mode]);
+                    r[g][mode] += fg.TestSynthPsnr(0, 1, 2, 0.5f, params, false, kInterval * gap).psnr;
+                    if (i == 1 && gap == 2 && strcmp(scene->key, "flash_text") == 0)
+                        SaveBmp(outDir + L"\\feat_flash_text" + (mode == 2 ? L"_pop.bmp" : mode ? L"_on.bmp" : L"_off.bmp"), fg.TestReadOutput(), W, H);
+                }
+            }
+        }
+        const double k = 1.0 / kSamples;
+        printf("%-10s %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f\n", scene->key, r[0][0] * k, r[0][1] * k, r[0][2] * k, r[1][0] * k, r[1][1] * k,
+               r[1][2] * k, r[2][0] * k, r[2][1] * k, r[2][2] * k);
+        fflush(stdout);
+        for (int g = 0; g < 3; g++) csv << "fade," << scene->key << "," << (1 << g) << "," << r[g][0] * k << "," << r[g][1] * k << ",," << r[g][2] * k << "\n";
+    }
+}
 
 int RunFrameGenSelfTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& outDir)
 {
@@ -439,6 +643,8 @@ int RunFrameGenSelfTest(ID3D11Device* device, ID3D11DeviceContext* context, cons
         longCsv << scene.key << "," << blend * k << "," << before * k << "," << after * k << "\n";
     }
 
+    RunFeatureTests(fg, scenes, MakeExtraScenes(noise), outDir);
+    fg.SetFeatures(FG_FEATURE_ALL);
     return 0;
 }
 
@@ -676,6 +882,114 @@ int RunFrameGenGapTest(ID3D11Device* device, ID3D11DeviceContext* context, const
         fflush(stdout);
         csv << c.gap << "," << t << "," << n << "," << hold * k << "," << blend * k << "," << block * k << "," << blockLong * k << ","
             << rife * rk << "," << kStep * 1000 << "," << estMs * k << "," << synMs * k << "\n";
+    }
+    // 연속 재생: 진짜 프레임을 한 장씩 건너뛰어(60fps 녹화라면 30fps) 실제 프로그램처럼 차례로 넣고, 건너뛴 장을 만들어 비교한다.
+    // 고정 픽셀 보호는 지난 쌍들로 쌓이므로 차례대로 넣어야 효과가 보인다. 1.6.0 처리(전부 켬)와 이전 처리(전부 끔)를 같은 쌍에서 비교한다.
+    // "고정 픽셀"은 세 장(앞, 정답, 뒤)에서 값이 같은 픽셀이다. 깨짐은 그중 만든 장이 정답과 8/255 넘게 다른 비율.
+    {
+        printf("\n[연속 재생] 한 장씩 건너뛴 순서로 넣고 건너뛴 장과 비교 (보호가 쌓이기 전 48쌍은 따로)\n%-8s %6s %9s %9s %12s %12s %9s %9s\n", "구간",
+               "쌍", "전체 이전", "전체 새", "고정 이전", "고정 새", "깨짐 이전", "깨짐 새");
+        std::ofstream seqCsv(outDir + L"\\fg_gaptest_sequence.csv");
+        seqCsv << "pair,k,old_db,new_db,static_px,old_broken,new_broken,cut_score\n";
+        const int savedFeatures = fg.Features();
+        fg.TestClearStill();
+        struct Sum { double oldDb = 0, newDb = 0, oldStatic = 0, newStatic = 0; long long oldBroken = 0, newBroken = 0, px = 0; int n = 0, nStatic = 0; } sums[2];
+        float cutMax = 0;
+        int pair = 0;
+        auto staticStats = [&](const std::vector<uint32_t>& out, const std::vector<uint32_t>& ref, const std::vector<uint8_t>& mask, double& mse,
+                               long long& broken, long long& count) {
+            mse = 0;
+            broken = count = 0;
+            for (size_t i = 0; i < out.size(); i++) {
+                if (!mask[i]) continue;
+                int worst = 0;
+                for (int c = 0; c < 3; c++) {
+                    const int d = (int)((out[i] >> (c * 8)) & 255) - (int)((ref[i] >> (c * 8)) & 255);
+                    mse += d * d / 3.0;
+                    worst = std::max(worst, std::abs(d));
+                }
+                broken += worst > 8;
+                count++;
+            }
+            mse = count ? mse / count : 0;
+        };
+        for (int k = 0; k + 2 < (int)frames.size(); k += 2, pair++) {
+            fg.TestLoadFrame(0, frames[k].data(), w, h);
+            fg.TestLoadFrame(1, frames[k + 2].data(), w, h);
+            fg.TestLoadFrame(2, frames[k + 1].data(), w, h);
+            fg.SetFeatures(FG_FEATURE_ALL);
+            const float cut = fg.TestCutScore(0, 1, defaults);
+            cutMax = std::max(cutMax, cut);
+            std::vector<uint8_t> mask(frames[k].size());
+            for (size_t i = 0; i < mask.size(); i++)
+                mask[i] = ((frames[k][i] ^ frames[k + 1][i]) & 0xFFFFFF) == 0 && ((frames[k + 2][i] ^ frames[k + 1][i]) & 0xFFFFFF) == 0;
+            double db[2], mse[2];
+            long long broken[2], count = 0;
+            for (int mode = 0; mode < 2; mode++) {
+                fg.SetFeatures(mode ? FG_FEATURE_ALL : 0);
+                db[mode] = fg.TestSynthPsnr(0, 1, 2, 0.5f, defaults, false, kStep * 2).psnr;
+                auto out = fg.TestReadOutput();
+                staticStats(out, frames[k + 1], mask, mse[mode], broken[mode], count);
+                if (pair == 60) {
+                    SaveBmp(outDir + (mode ? L"\\seq_new.bmp" : L"\\seq_old.bmp"), out, w, h);
+                    if (mode) SaveBmp(outDir + L"\\seq_truth.bmp", frames[k + 1], w, h);
+                }
+            }
+            if (pair == 60) {
+                // 이 쌍을 만들 때 쓴 고정 픽셀 상태를 정답 위에 칠한다 (CSCompose의 StillKeep과 같은 식).
+                // 하늘색: 둘레도 멈춰 있어 보호, 분홍: 둘레가 계속 움직여 보호, 노랑: 오래 같았지만 둘레 조건에 걸려 보호하지 않음.
+                // 이번 쌍에서 앞뒤가 4/255 넘게 다르면 보호하지 않으므로 칠하지 않는다.
+                const auto still = fg.TestReadStill();
+                std::vector<uint32_t> vis(frames[k + 1].size());
+                for (size_t i = 0; i < vis.size(); i++) {
+                    const uint32_t c = frames[k + 1][i];
+                    float rgb[3] = { (c & 255) * 0.35f, ((c >> 8) & 255) * 0.35f, ((c >> 16) & 255) * 0.35f };
+                    int diff = 0;
+                    for (int ch = 0; ch < 3; ch++)
+                        diff = std::max(diff, std::abs((int)((frames[k][i] >> (ch * 8)) & 255) - (int)((frames[k + 2][i] >> (ch * 8)) & 255)));
+                    const float count = (float)(still[i] & 0xFF), moving = (float)((still[i] >> 8) & 0xFFFF) / 65535.0f;
+                    const float old = std::clamp((count - 40.0f) / 8.0f, 0.0f, 1.0f);
+                    const float quiet = std::clamp((0.05f - moving) / 0.03f, 0.0f, 1.0f), busy = std::clamp((moving - 0.7f) / 0.1f, 0.0f, 1.0f);
+                    float color[3] = { 0, 0, 0 }, amount = 0;
+                    if (diff < 4 && old > 0) {
+                        if (quiet >= busy && quiet > 0) { color[0] = 80; color[1] = 200; color[2] = 255; amount = old * quiet; }
+                        else if (busy > 0) { color[0] = 255; color[1] = 90; color[2] = 200; amount = old * busy; }
+                        else { color[0] = 255; color[1] = 220; color[2] = 60; amount = old * 0.6f; }
+                    }
+                    for (int ch = 0; ch < 3; ch++) rgb[ch] = rgb[ch] * (1 - amount) + color[ch] * amount;
+                    vis[i] = 0xFF000000u | (uint32_t)rgb[0] | ((uint32_t)rgb[1] << 8) | ((uint32_t)rgb[2] << 16);
+                }
+                SaveBmp(outDir + L"\\seq_still.bmp", vis, w, h);
+            }
+            // 보호 상태는 이 쌍을 만든 뒤에 이 쌍으로 갱신한다 (실제 프로그램에서도 다음 쌍부터 쓰인다).
+            fg.SetFeatures(FG_FEATURE_ALL);
+            fg.TestUpdateStill(0, 1);
+            Sum& sum = sums[pair >= 48];
+            sum.oldDb += db[0];
+            sum.newDb += db[1];
+            if (count > 0) {
+                sum.oldStatic += mse[0] > 0 ? 10 * std::log10(255.0 * 255.0 / mse[0]) : 99;
+                sum.newStatic += mse[1] > 0 ? 10 * std::log10(255.0 * 255.0 / mse[1]) : 99;
+                sum.nStatic++;
+            }
+            sum.oldBroken += broken[0];
+            sum.newBroken += broken[1];
+            sum.px += count;
+            sum.n++;
+            seqCsv << pair << "," << k << "," << db[0] << "," << db[1] << "," << count << "," << broken[0] << "," << broken[1] << "," << cut << "\n";
+        }
+        const char* names[2] = { "앞 48쌍", "그 뒤" };
+        for (int i = 0; i < 2; i++) {
+            const Sum& sm = sums[i];
+            if (!sm.n) continue;
+            const double kn = 1.0 / sm.n, ks = sm.nStatic ? 1.0 / sm.nStatic : 0, kp = sm.px ? 100.0 / sm.px : 0;
+            printf("%-8s %6d %9.2f %9.2f %12.2f %12.2f %8.2f%% %8.2f%%\n", names[i], sm.n, sm.oldDb * kn, sm.newDb * kn, sm.oldStatic * ks,
+                   sm.newStatic * ks, sm.oldBroken * kp, sm.newBroken * kp);
+        }
+        printf("장면 전환 점수 최대 %.3f (전환으로 보는 기준 0.45)\n", cutMax);
+        fflush(stdout);
+        fg.SetFeatures(savedFeatures);
+        fg.TestClearStill();
     }
     // 학습 재현: 앞 절반의 프레임으로 실제 프로그램과 같은 순서로 학습하고, 보지 않은 뒤 절반에서 기본값과 비교한다.
     // 다른 화면이 섞인 경우: 게임 프레임과 계산으로 만든 장면을 24회씩 번갈아 채점한다 (메뉴, 결과 화면 대신).
@@ -995,5 +1309,322 @@ int RunFrameGenRegionBench(ID3D11Device* device, ID3D11DeviceContext* context, c
     summary << "width,height,region_w,region_h,area,full_estimate_ms,region_estimate_ms,full_synth_ms,region_synth_ms\n";
     summary << w << "," << h << "," << partOptions.regionW << "," << partOptions.regionH << "," << area << "," << e0 << "," << e1 << "," << s0 << ","
             << s1 << "\n";
+    return 0;
+}
+
+int RunFrameGenFeatureTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& outDir)
+{
+    MakeDirectories(outDir);
+    NoiseTexture noise;
+    FrameGen fg(device, context);
+    RunFeatureTests(fg, MakeScenes(noise), MakeExtraScenes(noise), outDir);
+    return 0;
+}
+
+int RunFrameGenPaceTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& outDir)
+{
+    MakeDirectories(outDir);
+    NoiseTexture noise;
+    auto scenes = MakeScenes(noise);
+    const Scene& pan = scenes[0].shade;
+    const int w = 320, h = 180;
+    auto makeTexture = [&](const std::vector<uint32_t>& rgba) {
+        std::vector<uint32_t> bgra(rgba.size());
+        for (size_t i = 0; i < rgba.size(); i++) {
+            uint32_t c = rgba[i];
+            bgra[i] = (c & 0xFF00FF00) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF);
+        }
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA data = { bgra.data(), (UINT)w * 4, 0 };
+        winrt::com_ptr<ID3D11Texture2D> tex;
+        winrt::check_hresult(device->CreateTexture2D(&td, &data, tex.put()));
+        return tex;
+    };
+
+    std::ofstream csv(outDir + L"\fg_pace.csv");
+    csv << "features,refresh_hz,drop_every,game_fps,generated_pct,step_error_pct,stalls_per_min,backs_per_min,jumps_per_min\n";
+    printf("[표시 간격] 화면마다 보여 준 게임 속 시간의 걸음 (이상적으로는 화면 한 칸만큼씩)\n");
+    printf("%6s %8s %8s %6s %10s %12s %10s %10s %10s\n", "처리", "주사율", "게임fps", "빠뜨림", "생성 비율", "걸음 오차", "멈춤/분", "뒤로/분", "건너뜀/분");
+    // drop: 게임이 이 장 수마다 한 장을 빠뜨린다 (0이면 빠뜨리지 않음)
+    const struct { double hz, fps; int drop; } cases[] = { { 60, 30, 0 }, { 60, 40, 0 }, { 60, 45, 0 }, { 60, 50, 0 }, { 60, 30, 40 }, { 60, 45, 40 },
+                                                           { 144, 30, 0 }, { 144, 40, 0 }, { 144, 48, 0 }, { 144, 60, 0 }, { 144, 72, 0 },
+                                                           { 144, 90, 0 }, { 144, 60, 40 } };
+    for (auto& c : cases)
+      for (int features : { 0, (int)FG_FEATURE_ALL }) {
+        FrameGen fg(device, context);
+        fg.SetFeatures(features);
+        FgOptions options;
+        options.learn = false;
+        options.refreshHz = c.hz;
+        const double vsync = 1.0 / c.hz;
+        const double seconds = 8.0, warmup = 2.0;
+        const double base = 100.0;  // 시각이 0 근처면 시작 처리와 겹치므로 띄운다
+        std::vector<double> trueTimes;  // 받아들인 순서대로 게임이 그 프레임을 그린 실제 시각
+        int next = 0;
+        int counted = 0, generated = 0, stalls = 0, backs = 0, jumps = 0;
+        double errorSum = 0, lastContent = -1;
+        const int refreshes = (int)(seconds * c.hz);
+        for (int n = 1; n <= refreshes; n++) {
+            const double now = base + n * vsync;
+            // 게임 프레임 k는 k/fps에 그려지고, 다음 화면 갱신에 캡처된다 (캡처 시각 = 그 화면 갱신 시각).
+            while (std::ceil((next / c.fps + 0.002) / vsync - 1e-9) <= n) {
+                if (c.drop > 0 && next % c.drop == c.drop / 2) {
+                    next++;  // 이 장은 게임이 그리지 못했다
+                    continue;
+                }
+                auto tex = makeTexture(Render(pan, (float)(next * 30.0 / c.fps), w, h));
+                fg.PushFrame(tex.get(), w, h, now, options);
+                trueTimes.push_back(next / c.fps);
+                next++;
+            }
+            fg.Render(now, options);
+            const FgStats& st = fg.Stats();
+            if (n * vsync < warmup || st.contentFrame < 1) continue;
+            const double index = st.contentFrame - 1;
+            const int i0 = std::clamp((int)std::floor(index), 0, (int)trueTimes.size() - 1);
+            const double frac = index - i0;
+            const double t0 = trueTimes[i0];
+            const double t1 = i0 + 1 < (int)trueTimes.size() ? trueTimes[i0 + 1] : t0 + 1.0 / c.fps;
+            const double content = t0 + (t1 - t0) * frac;
+            if (lastContent >= 0 && frac > 0.005 && frac < 0.995) generated++;
+            if (lastContent >= 0) {
+                const double step = content - lastContent;
+                errorSum += std::abs(step - vsync) / vsync;
+                if (step < -0.0005) backs++;
+                else if (step < 0.2 * vsync) stalls++;
+                else if (step > 1.8 * vsync) jumps++;
+                counted++;
+            }
+            lastContent = content;
+        }
+        const double minutes = (seconds - warmup) / 60.0;
+        const double genPct = 100.0 * generated / std::max(counted, 1), errPct = 100.0 * errorSum / std::max(counted, 1);
+        printf("%6s %8.0f %8.0f %6s %9.1f%% %11.1f%% %10.0f %10.0f %10.0f\n", features ? "새" : "이전", c.hz, c.fps, c.drop ? "있음" : "", genPct, errPct,
+               stalls / minutes, backs / minutes, jumps / minutes);
+        fflush(stdout);
+        csv << (features ? "new" : "old") << "," << c.hz << "," << c.drop << "," << c.fps << "," << genPct << "," << errPct << "," << stalls / minutes << "," << backs / minutes << "," << jumps / minutes << "\n";
+    }
+    return 0;
+}
+
+// 연속 재생 시험: 녹화의 진짜 프레임을 step장씩 건너뛰어 실제 프로그램처럼 차례로 넣고(고정 픽셀 기록을 먼저 갱신한 뒤 합성),
+// 건너뛴 가운데 장과 비교한다. 처리 조합(modes)마다 화면 전체, 고정 픽셀(세 장이 같은 픽셀), 지정한 상자의 결과와 GPU 시간을 낸다.
+// 프로필을 주면 그 고정 UI 상자로 시작하고, 끝나면 이번에 찾은 상자를 합쳐 같은 파일에 저장한다 (두 번 돌려 다음 확대를 흉내 낸다).
+int RunFrameGenSeqTest(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& dumpDir, const std::wstring& outDir,
+                       const SeqTestOptions& opt)
+{
+    std::vector<std::vector<uint32_t>> frames;
+    int w = 0, h = 0;
+    {
+        WIN32_FIND_DATAW fd;
+        HANDLE find = FindFirstFileW((dumpDir + L"\\frame_*_real.bmp").c_str(), &fd);
+        std::vector<std::wstring> names;
+        if (find != INVALID_HANDLE_VALUE) {
+            do names.push_back(fd.cFileName);
+            while (FindNextFileW(find, &fd));
+            FindClose(find);
+        }
+        std::sort(names.begin(), names.end());
+        for (auto& name : names) {
+            std::vector<uint32_t> rgba;
+            int fw, fh;
+            if (!LoadBmp(dumpDir + L"\\" + name, rgba, fw, fh)) continue;
+            if (!frames.empty() && frames.back() == rgba) continue;
+            w = fw;
+            h = fh;
+            frames.push_back(std::move(rgba));
+        }
+    }
+    const int step = std::max(2, opt.step & ~1);
+    if ((int)frames.size() < step * 4) {
+        printf("진짜 프레임이 부족합니다: %zu장\n", frames.size());
+        return 1;
+    }
+    MakeDirectories(outDir);
+    double kStep = 1.0 / 60.0;
+    {
+        std::ifstream timesFile(dumpDir + L"\\real_times.txt");
+        std::vector<double> times, gaps;
+        for (double v; timesFile >> v;) times.push_back(v);
+        for (size_t i = 1; i < times.size(); i++) gaps.push_back(times[i] - times[i - 1]);
+        if (gaps.size() >= 4) {
+            std::nth_element(gaps.begin(), gaps.begin() + gaps.size() / 2, gaps.end());
+            kStep = gaps[gaps.size() / 2];
+        }
+    }
+    const double pairGap = kStep * step;
+    FrameGen fg(device, context);
+    FgParams defaults;
+    GameProfile profile;
+    if (!opt.profile.empty()) profile.Load(opt.profile);
+    printf("진짜 프레임 %zu장 (%dx%d), 쌍 간격 %.1f ms, 시작할 때 고정 UI 상자 %zu개\n", frames.size(), w, h, pairGap * 1000,
+           profile.stillBoxes.size());
+    for (const StillBox& b : profile.stillBoxes)
+        printf("  상자 x %.3f y %.3f 너비 %.3f 높이 %.3f 확신도 %.0f\n", b.x, b.y, b.w, b.h, b.confidence);
+
+    fg.TestLoadFrame(0, frames[0].data(), w, h);  // 텍스처 크기를 정한다
+    fg.SetProfile(&profile);
+    fg.TestClearStill();
+
+    const size_t nModes = opt.modes.size(), nBoxes = opt.boxes.size();
+    struct Acc { double db = 0, staticDb = 0, est = 0, syn = 0; long long broken = 0, px = 0; int n = 0, nStatic = 0; std::vector<double> boxDb; };
+    std::vector<std::array<Acc, 3>> acc(nModes);
+    for (auto& a : acc) for (auto& s : a) s.boxDb.assign(nBoxes, 0.0);
+    std::ofstream csv(outDir + L"\\fg_seqtest.csv");
+    csv << "pair,k,mode,db,static_px,broken";
+    for (auto& b : opt.boxes) csv << "," << b.name << "_db";
+    csv << ",estimate_ms,synth_ms\n";
+
+    auto mseOf = [](const std::vector<uint32_t>& out, const std::vector<uint32_t>& ref, int w, int x0, int y0, int x1, int y1) {
+        double sum = 0;
+        long long n = 0;
+        for (int y = y0; y < y1; y++)
+            for (int x = x0; x < x1; x++) {
+                const size_t i = (size_t)y * w + x;
+                for (int c = 0; c < 3; c++) {
+                    const int d = (int)((out[i] >> (c * 8)) & 255) - (int)((ref[i] >> (c * 8)) & 255);
+                    sum += d * d;
+                }
+                n += 3;
+            }
+        return n ? sum / n : 0.0;
+    };
+    auto dbOf = [](double mse) { return mse > 1e-9 ? 10 * std::log10(255.0 * 255.0 / mse) : 99.0; };
+
+    int pair = 0, sinceGrid = 0;
+    const int loops = std::max(1, opt.loops);
+    const int pairsPerLoop = ((int)frames.size() - 1 - step) / step + 1;
+    for (int loop = 0; loop < loops; loop++)
+    for (int k = 0; k + step < (int)frames.size(); k += step, pair++) {
+        const auto& A = frames[k];
+        const auto& B = frames[k + step];
+        const auto& T = frames[k + step / 2];
+        fg.TestLoadFrame(0, A.data(), w, h);
+        fg.TestLoadFrame(1, B.data(), w, h);
+        fg.TestLoadFrame(2, T.data(), w, h);
+        // 실제 프로그램처럼 이 쌍으로 고정 픽셀 기록을 먼저 갱신하고 합성한다.
+        fg.SetFeatures(FG_FEATURE_ALL);
+        fg.TestUpdateStill(0, 1);
+        if (++sinceGrid >= opt.gridEvery) {
+            fg.TestStillGrid(sinceGrid * pairGap);
+            sinceGrid = 0;
+        }
+        std::vector<uint8_t> mask(A.size());
+        for (size_t i = 0; i < mask.size(); i++)
+            mask[i] = ((A[i] ^ T[i]) & 0xFFFFFF) == 0 && ((B[i] ^ T[i]) & 0xFFFFFF) == 0;
+        const bool save = std::find(opt.save.begin(), opt.save.end(), pair) != opt.save.end();
+        for (size_t m = 0; m < nModes; m++) {
+            fg.SetFeatures(opt.modes[m]);
+            fg.TestResetTimers();
+            const auto r = fg.TestSynthPsnr(0, 1, 2, 0.5f, defaults, false, pairGap);
+            const auto out = fg.TestReadOutput();
+            double sm = 0;
+            long long broken = 0, count = 0;
+            for (size_t i = 0; i < out.size(); i++) {
+                if (!mask[i]) continue;
+                int worst = 0;
+                for (int c = 0; c < 3; c++) {
+                    const int d = (int)((out[i] >> (c * 8)) & 255) - (int)((T[i] >> (c * 8)) & 255);
+                    sm += d * d / 3.0;
+                    worst = std::max(worst, std::abs(d));
+                }
+                broken += worst > 8;
+                count++;
+            }
+            Acc& a = acc[m][loop > 0 ? 2 : pair >= 48 ? 1 : 0];
+            a.db += r.psnr;
+            if (count) {
+                a.staticDb += dbOf(sm / count);
+                a.nStatic++;
+            }
+            a.broken += broken;
+            a.px += count;
+            a.est += r.estimateMs;
+            a.syn += r.synthMs;
+            a.n++;
+            csv << pair << "," << k << "," << opt.modes[m] << "," << r.psnr << "," << count << "," << broken;
+            for (size_t b = 0; b < nBoxes; b++) {
+                const auto& bx = opt.boxes[b];
+                const double db = dbOf(mseOf(out, T, w, bx.x, bx.y, std::min(w, bx.x + bx.w), std::min(h, bx.y + bx.h)));
+                a.boxDb[b] += db;
+                csv << "," << db;
+            }
+            csv << "," << r.estimateMs << "," << r.synthMs << "\n";
+            if (save) {
+                wchar_t name[64];
+                swprintf_s(name, L"\\seq_%03d_mode%d.bmp", pair, opt.modes[m]);
+                SaveBmp(outDir + name, out, w, h);
+            }
+        }
+        if (save) {
+            wchar_t name[64];
+            swprintf_s(name, L"\\seq_%03d_truth.bmp", pair);
+            SaveBmp(outDir + name, T, w, h);
+            swprintf_s(name, L"\\seq_%03d_a.bmp", pair);
+            SaveBmp(outDir + name, A, w, h);
+            swprintf_s(name, L"\\seq_%03d_b.bmp", pair);
+            SaveBmp(outDir + name, B, w, h);
+            // 보호 상태를 정답 위에 칠한다. 하늘색: 둘레도 멈춰 있어 보호, 분홍: 둘레가 계속 움직여 보호,
+            // 초록: 화면이 움직이는 동안 오래 그대로라 둘레와 상관없이 보호(고정 UI 증거), 노랑: 오래 같았지만 보호하지 않음.
+            const auto still = fg.TestReadStill();
+            std::vector<uint32_t> vis(T.size());
+            for (size_t i = 0; i < vis.size(); i++) {
+                const uint32_t c = T[i];
+                float rgb[3] = { (c & 255) * 0.35f, ((c >> 8) & 255) * 0.35f, ((c >> 16) & 255) * 0.35f };
+                int diff = 0;
+                for (int ch = 0; ch < 3; ch++)
+                    diff = std::max(diff, std::abs((int)((A[i] >> (ch * 8)) & 255) - (int)((B[i] >> (ch * 8)) & 255)));
+                const float cnt = (float)(still[i] & 0xFF), moving = (float)((still[i] >> 8) & 0xFFFF) / 65535.0f;
+                const float ui = std::clamp(((float)(still[i] >> 24) - 96.0f) / 32.0f, 0.0f, 1.0f);
+                const float old = std::clamp((cnt - 40.0f) / 8.0f, 0.0f, 1.0f);
+                const float quiet = std::clamp((0.05f - moving) / 0.03f, 0.0f, 1.0f), busy = std::clamp((moving - 0.7f) / 0.1f, 0.0f, 1.0f);
+                float color[3] = { 0, 0, 0 }, amount = 0;
+                if (diff < 4) {
+                    const float base = old * std::max(quiet, busy);
+                    if (ui > base && ui > 0) { color[0] = 90; color[1] = 230; color[2] = 90; amount = ui; }
+                    else if (base > 0 && quiet >= busy) { color[0] = 80; color[1] = 200; color[2] = 255; amount = base; }
+                    else if (base > 0) { color[0] = 255; color[1] = 90; color[2] = 200; amount = base; }
+                    else if (old > 0) { color[0] = 255; color[1] = 220; color[2] = 60; amount = old * 0.6f; }
+                }
+                for (int ch = 0; ch < 3; ch++) rgb[ch] = rgb[ch] * (1 - amount) + color[ch] * amount;
+                vis[i] = 0xFF000000u | (uint32_t)rgb[0] | ((uint32_t)rgb[1] << 8) | ((uint32_t)rgb[2] << 16);
+            }
+            swprintf_s(name, L"\\seq_%03d_still.bmp", pair);
+            SaveBmp(outDir + name, vis, w, h);
+        }
+    }
+    if (sinceGrid > 0) fg.TestStillGrid(sinceGrid * pairGap);
+
+    printf("\n%-6s %-8s %5s %8s %8s %8s %8s %8s", "조합", "구간", "쌍", "전체dB", "고정dB", "깨짐%", "추정ms", "합성ms");
+    for (auto& b : opt.boxes) printf(" %10s", b.name.c_str());
+    printf("\n");
+    const char* part[3] = { "앞 48쌍", "첫 회 뒤", "반복" };
+    printf("(한 회 %d쌍, %d회 반복)\n", pairsPerLoop, loops);
+    for (size_t m = 0; m < nModes; m++)
+        for (int p = 0; p < 3; p++) {
+            const Acc& a = acc[m][p];
+            if (!a.n) continue;
+            printf("%-6d %-8s %5d %8.2f %8.2f %8.3f %8.3f %8.3f", opt.modes[m], part[p], a.n, a.db / a.n, a.nStatic ? a.staticDb / a.nStatic : 0.0,
+                   a.px ? 100.0 * a.broken / a.px : 0.0, a.est / a.n, a.syn / a.n);
+            for (size_t b = 0; b < nBoxes; b++) printf(" %10.2f", a.boxDb[b] / a.n);
+            printf("\n");
+        }
+    const auto found = fg.FoundStillBoxes();
+    printf("\n이번에 찾은 고정 UI 상자 %zu개\n", found.size());
+    for (const StillBox& b : found)
+        printf("  x %.3f y %.3f 너비 %.3f 높이 %.3f (픽셀 %d,%d %dx%d)\n", b.x, b.y, b.w, b.h, (int)std::lround(b.x * w), (int)std::lround(b.y * h),
+               (int)std::lround(b.w * w), (int)std::lround(b.h * h));
+    printf("합친 뒤 프로필 상자 %zu개\n", profile.stillBoxes.size());
+    for (const StillBox& b : profile.stillBoxes)
+        printf("  x %.3f y %.3f 너비 %.3f 높이 %.3f 확신도 %.0f\n", b.x, b.y, b.w, b.h, b.confidence);
+    if (!opt.profile.empty()) profile.SaveTo(opt.profile);
+    fflush(stdout);
     return 0;
 }

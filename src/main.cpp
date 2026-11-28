@@ -1780,10 +1780,10 @@ static void RenderFrame()
             }
             if (g_fgLog) {
                 const FgStats& st = g_frameGen->Stats();
-                fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f,%d,%.3f,%.3f,%d,%d,%.3f,%.3f,%.2f,%.2f,%.2f,%.2f,%lld,%lld,%.3f,%.3f\n", now, st.displayT, st.realFrames,
+                fprintf(g_fgLog, "%.6f,%.4f,%lld,%lld,%lld,%lld,%.1f,%.6f,%d,%.3f,%.3f,%d,%d,%.3f,%.3f,%.2f,%.2f,%.2f,%.2f,%lld,%lld,%.3f,%.3f,%lld,%.6f\n", now, st.displayT, st.realFrames,
                         st.duplicates, st.rifeShown, st.rifeMissed, st.rifeMs, st.contentTime, st.rifeHeight, st.estimateMs, st.synthMs, st.workW,
                         st.workH, pushMs, renderMs, st.acceptLagMs, st.rifeLagMs, st.rifeLagLastMs,
-                        newFrame ? (pushStart - frameTime) * 1000.0 : -1.0, g_frameIndex, g_timedFrame, g_timedMs, g_timedFgMs);
+                        newFrame ? (pushStart - frameTime) * 1000.0 : -1.0, g_frameIndex, g_timedFrame, g_timedMs, g_timedFgMs, st.sceneCuts, st.captureContentTime);
             }
         } else if (s->fgWasOn && !g_settings.frameGen) {
             g_frameGen->SetProfile(nullptr);
@@ -2205,10 +2205,13 @@ int wmain(int argc, wchar_t** argv)
     //             --no-gui (설정 창 없이 실행) --console (로그를 보여 줄 콘솔 창 열기)
     std::wstring targetTitle;
     std::wstring fgRegionTestDir;
+    std::wstring fgPaceTestDir, fgFeatureTestDir;
+    int fgFeatures = FG_FEATURE_ALL;
     std::wstring regionBenchDump, regionBenchOut;
     float regionBench[4] = { 0.25f, 0.0f, 0.5f, 1.0f };
     std::wstring importProfile, exportProfileName, exportProfileFile;  // 학습 데이터 공유 (설정 창 버튼과 같다)
-    std::wstring fgSelfTestDir, rifeBenchDir, fgGapTestDump, fgGapTestOut, fgGapTestProfile;
+    std::wstring fgSelfTestDir, rifeBenchDir, fgGapTestDump, fgGapTestOut, fgGapTestProfile, fgSeqTestDump, fgSeqTestOut;
+    SeqTestOptions seqOptions;
     double duration = 0;
     double slowMoAuto = -1;
     bool regionEditAuto = false;  // 테스트용: 확대가 시작되면 영역 편집 창을 띄운다
@@ -2236,6 +2239,8 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--cursor-speed") g_settings.adjustCursorSpeed = true;
         else if (a == L"--fg-selftest" && i + 1 < argc) fgSelfTestDir = argv[++i];
         else if (a == L"--fg-regiontest" && i + 1 < argc) fgRegionTestDir = argv[++i];
+        else if (a == L"--fg-pacetest" && i + 1 < argc) fgPaceTestDir = argv[++i];
+        else if (a == L"--fg-featuretest" && i + 1 < argc) fgFeatureTestDir = argv[++i];
         else if (a == L"--fg-regionbench" && i + 2 < argc) {
             // 덤프 폴더, 결과 폴더, [x,y,w,h]
             regionBenchDump = argv[++i];
@@ -2257,6 +2262,40 @@ int wmain(int argc, wchar_t** argv)
             // 세 번째 값이 .json이면 비교할 게임 프로필이다.
             if (i + 1 < argc && std::wstring(argv[i + 1]).ends_with(L".json")) fgGapTestProfile = argv[++i];
         }
+        else if (a == L"--fg-seqtest" && i + 2 < argc) {
+            fgSeqTestDump = argv[++i];
+            fgSeqTestOut = argv[++i];
+        }
+        else if (a == L"--seq-modes" && i + 1 < argc) {
+            seqOptions.modes.clear();
+            for (const wchar_t* p = argv[++i]; *p;) {
+                seqOptions.modes.push_back(_wtoi(p));
+                while (*p && *p != L',') p++;
+                if (*p) p++;
+            }
+        }
+        else if (a == L"--seq-box" && i + 1 < argc) {
+            // 이름:x,y,w,h (원본 픽셀)
+            std::wstring v = argv[++i];
+            size_t colon = v.find(L':');
+            SeqTestBox box;
+            if (colon != std::wstring::npos && swscanf_s(v.c_str() + colon + 1, L"%d,%d,%d,%d", &box.x, &box.y, &box.w, &box.h) == 4) {
+                for (size_t c = 0; c < colon; c++) box.name += (char)v[c];
+                seqOptions.boxes.push_back(box);
+            }
+        }
+        else if (a == L"--seq-save" && i + 1 < argc) {
+            for (const wchar_t* p = argv[++i]; *p;) {
+                seqOptions.save.push_back(_wtoi(p));
+                while (*p && *p != L',') p++;
+                if (*p) p++;
+            }
+        }
+        else if (a == L"--seq-profile" && i + 1 < argc) seqOptions.profile = argv[++i];
+        else if (a == L"--seq-step" && i + 1 < argc) seqOptions.step = _wtoi(argv[++i]);
+        else if (a == L"--seq-loops" && i + 1 < argc) seqOptions.loops = std::max(1, _wtoi(argv[++i]));
+        else if (a == L"--seq-grid" && i + 1 < argc) seqOptions.gridEvery = std::max(1, _wtoi(argv[++i]));
+        else if (a == L"--fg-features" && i + 1 < argc) fgFeatures = _wtoi(argv[++i]);  // 비교 측정용: FgFeature 조합을 직접 정한다
         else if (a == L"--fg") g_settings.frameGen = true;
         else if (a == L"--no-fg") g_settings.frameGen = false;  // 프레임 생성을 끈 기준 측정용
         else if (a == L"--fg-mult" && i + 1 < argc) g_settings.fgMultiplier = _wtoi(argv[++i]);
@@ -2266,6 +2305,7 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--fg-block") SetFgMode(g_settings, FG_MODE_BLOCK);
         else if (a == L"--fg-visualize") g_settings.fgVisualize = true;
         else if (a == L"--no-gpu-priority") g_gpuPriorityAllowed = false;
+        else if (a == L"--fg-old") fgFeatures = 0;  // 비교 측정용: 1.6.0에서 더한 프레임 생성 처리를 모두 끈다
         else if (a == L"--rife-gpu-priority" && i + 1 < argc) g_rifeGpuClass = std::clamp(_wtoi(argv[++i]), 0, 5);
         else if (a == L"--fg-log" && i + 1 < argc) _wfopen_s(&g_fgLog, argv[++i], L"w");
         else if (a == L"--slowmo-auto" && i + 1 < argc) slowMoAuto = _wtof(argv[++i]);
@@ -2334,8 +2374,23 @@ int wmain(int argc, wchar_t** argv)
             MagUninitialize();
             return exitCode;
         }
+        if (!fgFeatureTestDir.empty()) {
+            exitCode = RunFrameGenFeatureTest(g_device.get(), g_ctx.get(), fgFeatureTestDir);
+            MagUninitialize();
+            return exitCode;
+        }
+        if (!fgPaceTestDir.empty()) {
+            exitCode = RunFrameGenPaceTest(g_device.get(), g_ctx.get(), fgPaceTestDir);
+            MagUninitialize();
+            return exitCode;
+        }
         if (!rifeBenchDir.empty()) {
             exitCode = RunRifeBench(rifeBenchDir);
+            MagUninitialize();
+            return exitCode;
+        }
+        if (!fgSeqTestDump.empty()) {
+            exitCode = RunFrameGenSeqTest(g_device.get(), g_ctx.get(), fgSeqTestDump, fgSeqTestOut, seqOptions);
             MagUninitialize();
             return exitCode;
         }
@@ -2346,9 +2401,10 @@ int wmain(int argc, wchar_t** argv)
         }
         RegisterHotkeys();
         if (useGui) g_autoOverlay = true;  // 모니터가 하나면 설정 창이 가려지므로 확대하면 메뉴와 영역 팝업을 띄운다
-        g_frameGenLoading = std::async(std::launch::async, [] {
+        g_frameGenLoading = std::async(std::launch::async, [fgFeatures] {
             auto frameGen = std::make_unique<FrameGen>(g_device.get(), g_ctx.get());
             frameGen->SetRealtime(true);
+            frameGen->SetFeatures(fgFeatures);
             return frameGen;
         });
         if (useGui && !GuiCreate(g_device.get(), g_ctx.get())) {
