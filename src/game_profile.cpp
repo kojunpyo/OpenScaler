@@ -389,6 +389,7 @@ void GameProfile::UpdateStillSession(const std::vector<StillBox>& found, double 
             if (BoxCoverage(b, { found[i] }) >= kStillBoxCover) covered++;
         merged[i] = covered >= 2;
     }
+    std::vector<StillBox> confirmed;  // 이번 확대에서 확인된 기존 상자 (새 상자를 더할지 가를 때 쓴다)
     for (const StillBox& b : stillBase) {
         int best = -1;
         float bestIou = 0.4f;  // 이만큼 겹쳐야 같은 상자로 본다
@@ -412,11 +413,13 @@ void GameProfile::UpdateStillSession(const std::vector<StillBox>& found, double 
             m.confidence = std::min(b.confidence + 1.0f, kStillBoxMaxConfidence);
             m.aspect = aspect;
             used[best] = true;
+            confirmed.push_back(b);
         } else if (BoxCoverage(b, found) >= kStillBoxCover) {
             // 이웃 상자와 붙어 큰 상자로 찾았거나 여러 조각으로 나뉘어 찾았어도 그 자리가 고정이면 확인된 것으로 본다.
             // 상자 모양이 달라 위치는 옮기지 않는다.
             m.confidence = std::min(b.confidence + 1.0f, kStillBoxMaxConfidence);
             m.aspect = aspect;
+            confirmed.push_back(b);
         } else {
             m.confidence = b.confidence - 1.0f;
         }
@@ -424,8 +427,9 @@ void GameProfile::UpdateStillSession(const std::vector<StillBox>& found, double 
     }
     for (size_t i = 0; i < found.size(); i++) {
         if (used[i]) continue;
-        // 대부분이 기존 상자 자리면 기존 상자들이 붙거나 나뉜 것이므로 새 상자로 더하지 않는다.
-        if (BoxCoverage(found[i], stillBase) >= kStillBoxCover) continue;
+        // 대부분이 이번에 확인된 기존 상자 자리면 기존 상자들이 붙거나 나뉜 것이므로 새 상자로 더하지 않는다.
+        // 확인되지 않은 기존 상자 안에서 찾은 상자는 더한다 (UI 크기를 줄이면 작아진 UI가 옛 큰 상자 안에 들어간다).
+        if (BoxCoverage(found[i], confirmed) >= kStillBoxCover) continue;
         StillBox m = found[i];
         m.confidence = 1.0f;
         m.aspect = aspect;
