@@ -73,6 +73,7 @@ struct StillBox {
 };
 constexpr int kStillBoxMax = 16;
 constexpr float kStillBoxMaxConfidence = 8.0f;
+constexpr float kStillBoxCover = 0.5f;  // 상자 넓이의 이만큼이 다른 쪽 상자들로 덮이면 같은 자리로 본다 (붙거나 나뉜 상자)
 constexpr double kStillBoxMinMoving = 20.0;  // 화면이 이만큼(초) 움직인 확대에서만 상자를 확인하거나 줄인다
 
 // 공유를 권하는 최소 채점 수 (RecentGain이 이만큼 모였을 때)

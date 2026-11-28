@@ -357,6 +357,20 @@ static float BoxIou(const StillBox& a, const StillBox& b)
     return uni > 0 ? inter / uni : 0;
 }
 
+// a의 넓이 중 boxes가 덮은 비율. 이번에 찾은 상자끼리는 겹치지 않으므로 겹친 넓이를 더해 1로 자른다.
+static float BoxCoverage(const StillBox& a, const std::vector<StillBox>& boxes)
+{
+    const float area = a.w * a.h;
+    if (area <= 0) return 0;
+    float inter = 0;
+    for (const StillBox& b : boxes) {
+        const float ix = std::max(0.0f, std::min(a.x + a.w, b.x + b.w) - std::max(a.x, b.x));
+        const float iy = std::max(0.0f, std::min(a.y + a.h, b.y + b.h) - std::max(a.y, b.y));
+        inter += ix * iy;
+    }
+    return std::min(1.0f, inter / area);
+}
+
 void GameProfile::UpdateStillSession(const std::vector<StillBox>& found, double movingSeconds, float aspect)
 {
     // 화면이 거의 움직이지 않았으면 고정인지 가릴 수 없으므로 시작할 때 그대로 둔다.
@@ -388,6 +402,11 @@ void GameProfile::UpdateStillSession(const std::vector<StillBox>& found, double 
             m.confidence = std::min(b.confidence + 1.0f, kStillBoxMaxConfidence);
             m.aspect = aspect;
             used[best] = true;
+        } else if (BoxCoverage(b, found) >= kStillBoxCover) {
+            // 이웃 상자와 붙어 큰 상자로 찾았거나 여러 조각으로 나뉘어 찾았어도 그 자리가 고정이면 확인된 것으로 본다.
+            // 상자 모양이 달라 위치는 옮기지 않는다.
+            m.confidence = std::min(b.confidence + 1.0f, kStillBoxMaxConfidence);
+            m.aspect = aspect;
         } else {
             m.confidence = b.confidence - 1.0f;
         }
@@ -395,6 +414,8 @@ void GameProfile::UpdateStillSession(const std::vector<StillBox>& found, double 
     }
     for (size_t i = 0; i < found.size(); i++) {
         if (used[i]) continue;
+        // 대부분이 기존 상자 자리면 기존 상자들이 붙거나 나뉜 것이므로 새 상자로 더하지 않는다.
+        if (BoxCoverage(found[i], stillBase) >= kStillBoxCover) continue;
         StillBox m = found[i];
         m.confidence = 1.0f;
         m.aspect = aspect;
